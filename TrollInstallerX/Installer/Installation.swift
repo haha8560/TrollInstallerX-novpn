@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Compression
 
 let fileManager = FileManager.default
 let docsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -37,43 +38,124 @@ func checkForMDCUnsandbox() -> Bool {
     return fileManager.fileExists(atPath: docsDir + "/full_disk_access_sandbox_token.txt")
 }
 
+/// Decode an LZFSE-compressed kernelcache buffer (Apple's native LZFSE format,
+/// magic `bvx2`…`bvx$`) using the system `compression` framework.
+/// Returns the decoded raw Mach-O data, or nil on failure.
+func decodeLZFSE(_ src: Data) -> Data? {
+    // Growable output buffer. iOS kernelcaches decompress to ~100–1000 MB.
+    var outSize = 384 * 1024 * 1024
+    for _ in 0..<6 {
+        var out = Data(count: outSize)
+        let written = out.withUnsafeMutableBytes { obuf -> Int in
+            src.withUnsafeBytes { ibuf -> Int in
+                let sp = ibuf.bindMemory(to: UInt8.self).baseAddress!
+                let dp = obuf.bindMemory(to: UInt8.self).baseAddress!
+                return compression_decode_buffer(dp, outSize, sp, src.count, nil, COMPRESSION_LZFSE)
+            }
+        }
+        if written > 0 && written < outSize {
+            return out.subdata(in: 0..<written)
+        } else if written == outSize {
+            // Buffer may have been too small — grow and retry.
+            outSize *= 2
+            if outSize > 2_000_000_000 { return nil }
+            continue
+        }
+        return nil
+    }
+    return nil
+}
+
+/// True if the first 4 bytes are a Mach-O magic.
+func isMachO(_ d: Data) -> Bool {
+    let m = d.prefix(4)
+    return m.elementsEqual([UInt8(0xcf), 0xfa, 0xed, 0xfe])   // MH_MAGIC_64 (LE)
+        || m.elementsEqual([UInt8(0xfe), 0xed, 0xfa, 0xcf])   // MH_MAGIC_64 (BE)
+        || m.elementsEqual([UInt8(0xce), 0xfa, 0xed, 0xfe])   // MH_MAGIC (LE)
+        || m.elementsEqual([UInt8(0xfe), 0xed, 0xfa, 0xce])   // MH_MAGIC (BE)
+}
+
+/// Ensure the file at `path` is a usable raw kernelcache Mach-O.
+/// - If it is NOT LZFSE, it is assumed already raw and usable.
+/// - If it IS LZFSE, it is decoded in place; the result must be a valid Mach-O.
+/// Returns false only when the file looked like LZFSE but failed to decode.
+func prepareKernelcache(_ path: String) -> Bool {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return false }
+    let isLZFSE = data.count >= 4 && data.prefix(4).elementsEqual([UInt8(0x62), 0x76, 0x78, 0x32]) // "bvx2"
+    guard isLZFSE else { return true }
+    Logger.log("检测到 LZFSE 内核缓存，正在本机解码（无需VPN）", type: .success)
+    guard let raw = decodeLZFSE(data) else {
+        Logger.log("内核缓存 LZFSE 解码失败", type: .error)
+        return false
+    }
+    guard raw.count > 4 && isMachO(raw) else {
+        Logger.log("内核缓存解码结果无效（非 Mach-O）", type: .error)
+        return false
+    }
+    try? raw.write(to: URL(fileURLWithPath: path))
+    Logger.log("内核缓存 LZFSE 解码成功（离线可用）", type: .success)
+    return true
+}
+
 func getKernel(_ device: Device) -> Bool {
     if !fileManager.fileExists(atPath: kernelPath) {
-        // 1. Try embedded kernelcache (100% offline, no network needed)
-        if let embedded = Bundle.main.path(forResource: "kernelcache", ofType: "") {
-            try? fileManager.copyItem(atPath: embedded, toPath: kernelPath)
-            if fileManager.fileExists(atPath: kernelPath) { return true }
+        // 1. Try embedded kernelcache (100% offline, no network needed).
+        //    The LZFSE-compressed blob for this exact device is embedded so the
+        //    install works fully offline (no VPN, no mirror). Decoded on-device.
+        if device.modelIdentifier == "iPhone14,2" {
+            if let embedded = Bundle.main.path(forResource: "kernelcache", ofType: "lzfse") {
+                try? fileManager.copyItem(atPath: embedded, toPath: kernelPath)
+            }
+        }
+        // (Legacy) raw embedded kernelcache
+        if !fileManager.fileExists(atPath: kernelPath) {
+            if let embedded = Bundle.main.path(forResource: "kernelcache", ofType: "") {
+                try? fileManager.copyItem(atPath: embedded, toPath: kernelPath)
+            }
         }
         // 2. Try MacDirtyCow unsandboxed system copy
-        if MacDirtyCow.supports(device) && checkForMDCUnsandbox() {
-            let fd = open(docsDir + "/full_disk_access_sandbox_token.txt", O_RDONLY)
-            if fd > 0 {
-                let tokenData = get_NSString_from_file(fd)
-                sandbox_extension_consume(tokenData)
-                Logger.log("正在复制内核缓存")
-                if let path = get_kernelcache_path() {
-                    do {
-                        try fileManager.copyItem(atPath: path, toPath: kernelPath)
-                        return true
-                    } catch {
-                        Logger.log("复制内核缓存失败", type: .error)
-                        NSLog("Failed to copy kernelcache - \(error)")
+        if !fileManager.fileExists(atPath: kernelPath) {
+            if MacDirtyCow.supports(device) && checkForMDCUnsandbox() {
+                let fd = open(docsDir + "/full_disk_access_sandbox_token.txt", O_RDONLY)
+                if fd > 0 {
+                    let tokenData = get_NSString_from_file(fd)
+                    sandbox_extension_consume(tokenData)
+                    Logger.log("正在复制内核缓存")
+                    if let path = get_kernelcache_path() {
+                        do {
+                            try fileManager.copyItem(atPath: path, toPath: kernelPath)
+                        } catch {
+                            Logger.log("复制内核缓存失败", type: .error)
+                            NSLog("Failed to copy kernelcache - \(error)")
+                        }
                     }
                 }
             }
         }
         // 3. Try all configured mirrors (China-accessible, no VPN needed)
-        if downloadKernelcacheFromAnyMirror(device, to: kernelPath) {
-            return true
+        if !fileManager.fileExists(atPath: kernelPath) {
+            if downloadKernelcacheFromAnyMirror(device, to: kernelPath) {
+                Logger.log("已从镜像获取内核缓存", type: .success)
+            }
         }
         // 4. Last resort: Apple's official servers (requires VPN in China)
-        Logger.log("正在从 Apple 服务器下载内核（可能需要VPN）")
-        if grab_kernelcache(kernelPath) {
-            return true
+        if !fileManager.fileExists(atPath: kernelPath) {
+            Logger.log("正在从 Apple 服务器下载内核（可能需要VPN）")
+            if grab_kernelcache(kernelPath) {
+                Logger.log("已从 Apple 服务器获取内核缓存", type: .success)
+            }
         }
         // 5. All sources exhausted — show clear guidance
-        Logger.log("⚠️ 内核缓存获取失败（所有来源均不可达）", type: .error)
-        Logger.log("请尝试：①开启VPN后重试 ②或手动将kernelcache放入应用文档目录", type: .error)
+        if !fileManager.fileExists(atPath: kernelPath) {
+            Logger.log("⚠️ 内核缓存获取失败（所有来源均不可达）", type: .error)
+            Logger.log("请尝试：①开启VPN后重试 ②或手动将kernelcache放入应用文档目录", type: .error)
+            return false
+        }
+    }
+    // Decode LZFSE-compressed kernelcache in place (safe no-op for raw files),
+    // and validate it is a usable Mach-O before handing it to the patchfinder.
+    if !prepareKernelcache(kernelPath) {
+        try? fileManager.removeItem(atPath: kernelPath)
         return false
     }
     return true

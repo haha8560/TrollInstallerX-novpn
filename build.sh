@@ -29,15 +29,21 @@ xcodebuild -configuration "$CONFIG" \
 APP_DIR="DerivedData/$SCHEME/Build/Products/$CONFIG-iphoneos"
 cp Resources/ents.plist "$APP_DIR/"
 
-# Embed a pre-extracted kernelcache for a 100% offline, no-VPN install.
-# Obtain it with fetch_kernelcache.py (or copy one in manually) and place it at
-# Resources/kernelcache. If absent, the app falls back to the configured mirror
-# (KernelcacheSource.mirrorBaseURL) and finally to Apple's servers.
+# Embed a pre-extracted LZFSE-compressed kernelcache for a 100% offline,
+# no-VPN install. It lives at kernelcaches/<model>/kernelcache and is embedded
+# as kernelcache.lzfse; the app decodes it on-device via compression_decode_buffer.
+# If absent, the app falls back to the configured mirror and finally Apple.
+if [ -f kernelcaches/iPhone14,2/kernelcache ]; then
+  cp kernelcaches/iPhone14,2/kernelcache "$APP_DIR/$SCHEME.app/kernelcache.lzfse"
+  echo "-> Embedded kernelcaches/iPhone14,2/kernelcache as kernelcache.lzfse (offline install enabled)"
+else
+  echo "-> No kernelcaches/iPhone14,2/kernelcache found; will use mirror/Apple at runtime"
+fi
+
+# (Legacy) raw embedded kernelcache support
 if [ -f Resources/kernelcache ]; then
   cp Resources/kernelcache "$APP_DIR/$SCHEME.app/kernelcache"
   echo "-> Embedded Resources/kernelcache (offline install enabled)"
-else
-  echo "-> No Resources/kernelcache found; will use mirror/Apple at runtime"
 fi
 
 pushd "$APP_DIR" >/dev/null
