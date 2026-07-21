@@ -55,3 +55,17 @@ bool install_persistence_helper(NSString *app) {
     printf("trollstorehelper output: %s\n", [stdout UTF8String]);
     return ret == 0;
 }
+
+/// Install persistence helper with custom paths (used by indirect install path).
+/// After vnode-based binary replacement, we must also update the trust cache
+/// so AMFI on iOS 16.x accepts the injected PersistenceHelper binary.
+/// Without this step, opening the host app (e.g. Tips) results in an immediate crash.
+bool install_persistence_helper_with_paths(NSString *app, NSString *persistenceHelperPath, NSString *helperPath) {
+    NSString *stdout;
+    chmod(helperPath.UTF8String, 0755);
+    chown(helperPath.UTF8String, 0, 0);
+    int ret = run_binary(helperPath, @[@"install-persistence-helper", app, persistenceHelperPath, helperPath], &stdout);
+    printf("trollstorehelper (indirect) returned %d\n", ret);
+    printf("trollstorehelper (indirect) output: %s\n", [stdout UTF8String]);
+    return ret == 0;
+}
