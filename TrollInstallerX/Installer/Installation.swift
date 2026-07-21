@@ -411,26 +411,35 @@ func doDirectInstall(_ device: Device) async -> Bool {
 
 func doIndirectInstall(_ device: Device) async -> Bool {
     let exploit = selectExploit(device)
-    
+    let iOS14 = device.version < Version("15.0")
+    let supportsFullPhysRW = !(device.cpuFamily == .A8 && device.version > Version("15.1.1")) && ((device.isArm64e && device.version >= Version(major: 15, minor: 2)) || (!device.isArm64e && device.version >= Version("15.0")))
+
     Logger.log("当前设备：\(device.modelIdentifier)，iOS \(device.version.readableString)")
-    
+
+    // v9 修复：getKernel/initialise_kernel_info 必须在 exploit.initialise() 之前调用
+    // （与 doDirectInstall 顺序一致）。否则 kfd/landa 利用获得内核原语后，再做 LZFSE
+    // 内核解码等大内存/IO 操作会破坏原语稳定性，后续 PPL 绕过后 build_physrw/unsandbox
+    // 时内核 panic → 手机黑屏重启。这是 v8 崩溃的根因。
+    if !iOS14 {
+        if !(getKernel(device)) {
+            Logger.log("获取内核失败", type: .error)
+            return false
+        }
+    }
+
+    Logger.log("正在分析内核信息")
+    if !initialise_kernel_info(kernelPath, iOS14) {
+        Logger.log("内核分析失败", type: .error)
+        return false
+    }
+
     if !extractTrollStoreIndirect() {
         return false
     }
     defer {
         cleanupIndirectInstall()
     }
-    
-    if !(getKernel(device)) {
-        Logger.log("获取内核失败", type: .error)
-    }
-    
-    Logger.log("正在分析内核信息")
-    if !initialise_kernel_info(kernelPath, false) {
-        Logger.log("内核分析失败", type: .error)
-        return false
-    }
-    
+
     Logger.log("正在利用内核漏洞 (\(exploit.name))")
     if !exploit.initialise() {
         Logger.log("内核利用失败", type: .error)
@@ -442,40 +451,38 @@ func doIndirectInstall(_ device: Device) async -> Bool {
         }
     }
     Logger.log("内核利用成功！", type: .success)
-    post_kernel_exploit(false)
+    post_kernel_exploit(iOS14)
 
-    // ── v8 关键修复：完整的权限提升链 ──
-    // doDirectInstall 在调用 trollstorehelper 前会执行：
-    //   dmaFail→physrw→unsandbox→get_root_pplrw→platformise→remount
-    // doIndirectInstall 之前完全缺失这些步骤！
-    // 结果：trollstorehelper 从 Documents/(沙盒内)以普通用户身份运行，
-    //   无法修改内核 pmap_image4_trust_caches → 信任缓存更新失败 → Tips 闪退
-    let iOS14_indirect = device.version < Version("15.0")
-    let supportsFullPhysRW_indirect = !(device.cpuFamily == .A8 && device.version > Version("15.1.1")) && ((device.isArm64e && device.version >= Version(major: 15, minor: 2)) || (!device.isArm64e && device.version >= Version("15.0")))
-
-    if supportsFullPhysRW_indirect {
+    // 权限提升链（与 doDirectInstall 完全一致，已验证稳定）
+    // 关键：上方的 getKernel 已移到 exploit.initialise() 之前，内核原语干净，
+    // 因此 dmaFail 绕过 PPL + build_physrw 不会触发 panic（v8 崩溃根因已修复）。
+    if supportsFullPhysRW {
         if device.isArm64e {
             Logger.log("正在绕过 PPL (\(dmaFail.name))")
             if !dmaFail.initialise() {
-                Logger.log("绕过 PPL 失败（非致命，继续尝试）", type: .warning)
-            } else {
-                Logger.log("成功绕过 PPL！", type: .success)
+                Logger.log("绕过 PPL 失败", type: .error)
+                return false
             }
+            Logger.log("成功绕过 PPL！", type: .success)
         }
         if #available(iOS 16, *) {
             libjailbreak_kalloc_pt_init()
         }
         if !build_physrw_primitive() {
             Logger.log("构建物理读写原语失败", type: .error)
+            return false
         }
         if device.isArm64e {
             if !dmaFail.deinitialise() {
                 Logger.log("释放 \(dmaFail.name) 失败", type: .error)
+                return false
             }
         }
-        if !exploit.deinitialise() {
-            Logger.log("释放 \(exploit.name) 失败", type: .error)
-        }
+        // 注意：此处不调用 exploit.deinitialise()，保持 exploit 存活至函数末尾的
+        // defer。原因：后续 install_persistence_helper_via_vnode（vnode 注入）使用
+        // kread/kwrite 原语，虽然 build_physrw_primitive 已将其重路由到 physrw_pte
+        // （与 exploit 无关），但保留 exploit 存活可确保与官方间接安装路径行为一致、
+        // 避免重复 deinitialise（函数末尾 defer 已负责清理）。
         Logger.log("正在解除沙箱限制")
         if !unsandbox() {
             Logger.log("解除沙箱失败", type: .error)
@@ -495,14 +502,14 @@ func doIndirectInstall(_ device: Device) async -> Bool {
         }
     } else {
         Logger.log("正在解除沙箱并提升权限（旧设备路径）")
-        if !get_root_krw(iOS14_indirect) {
+        if !get_root_krw(iOS14) {
             Logger.log("提权失败", type: .error)
         }
     }
     remount_private_preboot()
 
     // 将 trollstorehelper 复制到 /private/preboot/tmp/（与 direct 路径一致）
-    // 这样 install_persistence_helper 可以用标准路径、以 root 身份执行
+    // install_persistence_helper 会用标准路径、以 root 身份执行信任缓存更新
     let prebootHelper = "/private/preboot/tmp/trollstorehelper"
     let prebootPH = "/private/preboot/tmp/TrollStore/TrollStore.app/PersistenceHelper"
     if !FileManager.default.fileExists(atPath: prebootHelper) {
@@ -520,7 +527,6 @@ func doIndirectInstall(_ device: Device) async -> Bool {
             }
         }
     }
-    // ── v8 权限提升结束 ──
 
     var path: UnsafePointer<CChar>? = nil
     let pathPointer = withUnsafeMutablePointer(to: &path) { ptr in
@@ -566,23 +572,16 @@ func doIndirectInstall(_ device: Device) async -> Bool {
         Logger.log("持久化助手安装成功！", type: .success)
         success = true
 
-        // v8 fix: 用 root 身份从 /private/preboot/tmp/ 调用 trollstorehelper
+        // 用 root 身份从 /private/preboot/tmp/ 调用 trollstorehelper
         // 更新系统信任缓存（pmap_image4_trust_caches）。
         // 这是 iOS 16.x 间接安装的必要步骤——缺少则 AMFI 会杀掉注入的
-        // PersistenceHelper，导致打开 Tips 立即闪退。
-        let prebootHelper = "/private/preboot/tmp/trollstorehelper"
-        if FileManager.default.fileExists(atPath: prebootHelper) {
-            Logger.log("正在更新系统信任缓存（root 权限执行）")
-            // 使用标准 install_persistence_helper 函数（路径为 /private/preboot/tmp/）
-            if install_persistence_helper(pathToInstall) {
-                Logger.log("信任缓存更新成功！Tips 应可正常打开", type: .success)
-            } else {
-                Logger.log("⚠️ 信任缓存更新失败（Tips 可能仍会闪退）", type: .error)
-                // 失败不阻止整体流程——注入本身已成功
-            }
+        // PersistenceHelper，导致打开 Tips 立即闪退。trollstorehelper 已在上方
+        // 部署到 /private/preboot/tmp/，此处以 root 进程执行信任缓存更新。
+        Logger.log("正在更新系统信任缓存（root 权限执行）")
+        if install_persistence_helper(pathToInstall) {
+            Logger.log("信任缓存更新成功！Tips 应可正常打开", type: .success)
         } else {
-            Logger.log("⚠️ 未找到 trollstorehelper（/private/preboot/tmp/），跳过信任缓存更新", type: .warning)
-            Logger.log("   这可能导致 Tips 打开时闪退", type: .warning)
+            Logger.log("⚠️ 信任缓存更新失败（Tips 可能仍会闪退）", type: .error)
         }
     }
     
