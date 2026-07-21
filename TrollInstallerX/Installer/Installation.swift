@@ -443,7 +443,85 @@ func doIndirectInstall(_ device: Device) async -> Bool {
     }
     Logger.log("内核利用成功！", type: .success)
     post_kernel_exploit(false)
-    
+
+    // ── v8 关键修复：完整的权限提升链 ──
+    // doDirectInstall 在调用 trollstorehelper 前会执行：
+    //   dmaFail→physrw→unsandbox→get_root_pplrw→platformise→remount
+    // doIndirectInstall 之前完全缺失这些步骤！
+    // 结果：trollstorehelper 从 Documents/(沙盒内)以普通用户身份运行，
+    //   无法修改内核 pmap_image4_trust_caches → 信任缓存更新失败 → Tips 闪退
+    let iOS14_indirect = device.version < Version("15.0")
+    let supportsFullPhysRW_indirect = !(device.cpuFamily == .A8 && device.version > Version("15.1.1")) && ((device.isArm64e && device.version >= Version(major: 15, minor: 2)) || (!device.isArm64e && device.version >= Version("15.0")))
+
+    if supportsFullPhysRW_indirect {
+        if device.isArm64e {
+            Logger.log("正在绕过 PPL (\(dmaFail.name))")
+            if !dmaFail.initialise() {
+                Logger.log("绕过 PPL 失败（非致命，继续尝试）", type: .warning)
+            } else {
+                Logger.log("成功绕过 PPL！", type: .success)
+            }
+        }
+        if #available(iOS 16, *) {
+            libjailbreak_kalloc_pt_init()
+        }
+        if !build_physrw_primitive() {
+            Logger.log("构建物理读写原语失败", type: .error)
+        }
+        if device.isArm64e {
+            if !dmaFail.deinitialise() {
+                Logger.log("释放 \(dmaFail.name) 失败", type: .error)
+            }
+        }
+        if !exploit.deinitialise() {
+            Logger.log("释放 \(exploit.name) 失败", type: .error)
+        }
+        Logger.log("正在解除沙箱限制")
+        if !unsandbox() {
+            Logger.log("解除沙箱失败", type: .error)
+        } else {
+            Logger.log("沙箱已解除", type: .success)
+        }
+        Logger.log("正在提升权限（root + 平台二进制）")
+        if !get_root_pplrw() {
+            Logger.log("提升 root 权限失败", type: .error)
+        } else {
+            Logger.log("Root 权限获取成功", type: .success)
+        }
+        if !platformise() {
+            Logger.log("平台化失败", type: .error)
+        } else {
+            Logger.log("平台二进制状态已设置", type: .success)
+        }
+    } else {
+        Logger.log("正在解除沙箱并提升权限（旧设备路径）")
+        if !get_root_krw(iOS14_indirect) {
+            Logger.log("提权失败", type: .error)
+        }
+    }
+    remount_private_preboot()
+
+    // 将 trollstorehelper 复制到 /private/preboot/tmp/（与 direct 路径一致）
+    // 这样 install_persistence_helper 可以用标准路径、以 root 身份执行
+    let prebootHelper = "/private/preboot/tmp/trollstorehelper"
+    let prebootPH = "/private/preboot/tmp/TrollStore/TrollStore.app/PersistenceHelper"
+    if !FileManager.default.fileExists(atPath: prebootHelper) {
+        let srcHelper = docsDir + "/trollstorehelper"
+        let srcPH = docsDir + "/PersistenceHelper"
+        if FileManager.default.fileExists(atPath: srcHelper) {
+            do {
+                try? FileManager.default.removeItem(atPath: "/private/preboot/tmp/TrollStore")
+                try FileManager.default.createDirectory(atPath: "/private/preboot/tmp/TrollStore/TrollStore.app", withIntermediateDirectories: true)
+                try FileManager.default.copyItem(atPath: srcHelper, toPath: prebootHelper)
+                try FileManager.default.copyItem(atPath: srcPH, toPath: prebootPH)
+                Logger.log("信任缓存工具已部署到系统路径", type: .success)
+            } catch {
+                Logger.log("部署信任缓存工具失败: \(error.localizedDescription)", type: .error)
+            }
+        }
+    }
+    // ── v8 权限提升结束 ──
+
     var path: UnsafePointer<CChar>? = nil
     let pathPointer = withUnsafeMutablePointer(to: &path) { ptr in
         UnsafeMutablePointer<UnsafePointer<CChar>?>.init(ptr)
@@ -488,25 +566,23 @@ func doIndirectInstall(_ device: Device) async -> Bool {
         Logger.log("持久化助手安装成功！", type: .success)
         success = true
 
-        // v7 fix: After vnode-based binary replacement, we MUST also update the
-        // system trust cache so AMFI on iOS 16.x accepts the injected PersistenceHelper.
-        // Without this step, opening the host app (e.g. Tips) crashes immediately.
-        // The trollstorehelper's "install-persistence-helper" command edits
-        // pmap_image4_trust_caches to include the new binary's CDHash.
-        let indirectHelperPath = docsDir + "/trollstorehelper"
-        let indirectPHPath = docsDir + "/PersistenceHelper"
-        if FileManager.default.fileExists(atPath: indirectHelperPath)
-            && FileManager.default.fileExists(atPath: indirectPHPath) {
-            Logger.log("正在更新系统信任缓存（防止闪退）")
-            if install_persistence_helper_with_paths(pathToInstall, indirectPHPath, indirectHelperPath) {
-                Logger.log("信任缓存更新成功！", type: .success)
+        // v8 fix: 用 root 身份从 /private/preboot/tmp/ 调用 trollstorehelper
+        // 更新系统信任缓存（pmap_image4_trust_caches）。
+        // 这是 iOS 16.x 间接安装的必要步骤——缺少则 AMFI 会杀掉注入的
+        // PersistenceHelper，导致打开 Tips 立即闪退。
+        let prebootHelper = "/private/preboot/tmp/trollstorehelper"
+        if FileManager.default.fileExists(atPath: prebootHelper) {
+            Logger.log("正在更新系统信任缓存（root 权限执行）")
+            // 使用标准 install_persistence_helper 函数（路径为 /private/preboot/tmp/）
+            if install_persistence_helper(pathToInstall) {
+                Logger.log("信任缓存更新成功！Tips 应可正常打开", type: .success)
             } else {
-                Logger.log("信任缓存更新失败（可能仍会导致闪退）", type: .warning)
-                // Don't set success=false here — the injection itself succeeded,
-                // and the user can retry or use alternative methods.
+                Logger.log("⚠️ 信任缓存更新失败（Tips 可能仍会闪退）", type: .error)
+                // 失败不阻止整体流程——注入本身已成功
             }
         } else {
-            Logger.log("找不到 trollstorehelper/PersistenceHelper，跳过信任缓存更新", type: .warning)
+            Logger.log("⚠️ 未找到 trollstorehelper（/private/preboot/tmp/），跳过信任缓存更新", type: .warning)
+            Logger.log("   这可能导致 Tips 打开时闪退", type: .warning)
         }
     }
     
