@@ -11,11 +11,11 @@ struct TrollHelperOTAView: View {
     @Binding var arm64eVersion: Bool
     var body: some View {
             VStack {
-                Text("TrollHelperOTA")
+                Text("TrollHelperOTA 安装")
                     .font(.system(size: 23, weight: .semibold, design: .rounded))
                     .foregroundColor(.white)
                     .padding()
-                Text("Your device is compatible with TrollHelperOTA - a 100% reliable installation method that does not require you to sideload an app. You can tap outside this alert to dismiss this, or press the button below to install via OTA.")
+                Text("您的设备支持 TrollHelperOTA —— 一种 100% 可靠的安装方式，无需自签应用。点击弹窗外部可关闭，或点击下方按钮通过 OTA 安装。")
                     .font(.system(size: 16, weight: .regular, design: .rounded))
                     .multilineTextAlignment(.center)
                     .foregroundColor(.white)
@@ -28,7 +28,7 @@ struct TrollHelperOTAView: View {
                             .frame(width: 175, height: 45)
                             .foregroundColor(.white.opacity(0.2))
                             .shadow(radius: 10)
-                        Text("Take me there")
+                        Text("前往安装")
                             .font(.system(size: 16, weight: .semibold, design: .rounded))
                             .foregroundColor(.white)
                     }

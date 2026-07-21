@@ -41,13 +41,13 @@ func getKernel(_ device: Device) -> Bool {
             if fd > 0 {
                 let tokenData = get_NSString_from_file(fd)
                 sandbox_extension_consume(tokenData)
-                Logger.log("Copying kernelcache")
+                Logger.log("正在复制内核缓存")
                 let path = get_kernelcache_path()
                 do {
                     try fileManager.copyItem(atPath: path!, toPath: kernelPath)
                     return true
                 } catch {
-                    Logger.log("Failed to copy kernelcache", type: .error)
+                    Logger.log("复制内核缓存失败", type: .error)
                     NSLog("Failed to copy kernelcache - \(error)")
                 }
             }
@@ -56,15 +56,15 @@ func getKernel(_ device: Device) -> Bool {
         // first so the app works behind the GFW without a VPN. Otherwise (or if
         // the mirror fails) fall back to Apple's servers via grab_kernelcache.
         if KernelcacheSource.mirrorBaseURL != nil {
-            Logger.log("Downloading kernel from mirror (no-VPN)")
+            Logger.log("正在从镜像下载内核（无需VPN）")
             if downloadKernelcacheFromMirror(device, to: kernelPath) {
                 return true
             }
-            Logger.log("Mirror download failed, falling back to Apple", type: .error)
+            Logger.log("镜像下载失败，回退到 Apple 服务器", type: .error)
         }
-        Logger.log("Downloading kernel")
-        if !grab_kernelcache(kernelPath) {
-            Logger.log("Failed to download kernel", type: .error)
+    Logger.log("正在下载内核")
+    if !grab_kernelcache(kernelPath) {
+        Logger.log("下载内核失败", type: .error)
             return false
         }
     }
@@ -150,27 +150,27 @@ func doDirectInstall(_ device: Device) async -> Bool {
     let iOS14 = device.version < Version("15.0")
     let supportsFullPhysRW = !(device.cpuFamily == .A8 && device.version > Version("15.1.1")) && ((device.isArm64e && device.version >= Version(major: 15, minor: 2)) || (!device.isArm64e && device.version >= Version("15.0")))
     
-    Logger.log("Running on an \(device.modelIdentifier) on iOS \(device.version.readableString)")
-    
+    Logger.log("当前设备：\(device.modelIdentifier)，iOS \(device.version.readableString)")
+
     if !iOS14 {
         if !(getKernel(device)) {
-            Logger.log("Failed to get kernel", type: .error)
+            Logger.log("获取内核失败", type: .error)
             return false
         }
     }
-    
-    Logger.log("Gathering kernel information")
+
+    Logger.log("正在分析内核信息")
     if !initialise_kernel_info(kernelPath, iOS14) {
-        Logger.log("Failed to patchfind kernel", type: .error)
+        Logger.log("内核分析失败", type: .error)
         return false
     }
-    
-    Logger.log("Exploiting kernel (\(exploit.name))")
+
+    Logger.log("正在利用内核漏洞 (\(exploit.name))")
     if !exploit.initialise() {
-        Logger.log("Failed to exploit the kernel", type: .error)
+        Logger.log("内核利用失败", type: .error)
         return false
     }
-    Logger.log("Successfully exploited the kernel", type: .success)
+    Logger.log("内核利用成功！", type: .success)
     post_kernel_exploit(iOS14)
     
     var trollstoreTarData: Data?
@@ -180,12 +180,12 @@ func doDirectInstall(_ device: Device) async -> Bool {
     
     if supportsFullPhysRW {
         if device.isArm64e {
-            Logger.log("Bypassing PPL (\(dmaFail.name))")
+            Logger.log("正在绕过 PPL (\(dmaFail.name))")
             if !dmaFail.initialise() {
-                Logger.log("Failed to bypass PPL", type: .error)
+                Logger.log("绕过 PPL 失败", type: .error)
                 return false
             }
-            Logger.log("Successfully bypassed PPL", type: .success)
+            Logger.log("成功绕过 PPL！", type: .success)
         }
         
         if #available(iOS 16, *) {
@@ -193,42 +193,42 @@ func doDirectInstall(_ device: Device) async -> Bool {
         }
         
         if !build_physrw_primitive() {
-            Logger.log("Failed to build physical R/W primitive", type: .error)
+            Logger.log("构建物理读写原语失败", type: .error)
             return false
         }
         
         if device.isArm64e {
             if !dmaFail.deinitialise() {
-                Logger.log("Failed to deinitialise \(dmaFail.name)", type: .error)
+                Logger.log("释放 \(dmaFail.name) 失败", type: .error)
                 return false
             }
         }
         
         if !exploit.deinitialise() {
-            Logger.log("Failed to deinitialise \(exploit.name)", type: .error)
+            Logger.log("释放 \(exploit.name) 失败", type: .error)
             return false
         }
-        
-        Logger.log("Unsandboxing")
+
+        Logger.log("正在解除沙箱限制")
         if !unsandbox() {
-            Logger.log("Failed to unsandbox", type: .error)
+            Logger.log("解除沙箱失败", type: .error)
             return false
         }
-        
-        Logger.log("Escalating privileges")
+
+        Logger.log("正在提升权限")
         if !get_root_pplrw() {
-            Logger.log("Failed to escalate privileges", type: .error)
+            Logger.log("提升权限失败", type: .error)
             return false
         }
         if !platformise() {
-            Logger.log("Failed to platformise", type: .error)
+            Logger.log("平台化失败", type: .error)
             return false
         }
     } else {
         
-        Logger.log("Unsandboxing and escalating privileges")
+        Logger.log("正在解除沙箱并提升权限")
         if !get_root_krw(iOS14) {
-            Logger.log("Failed to unsandbox and escalate privileges", type: .error)
+            Logger.log("解除沙箱或提升权限失败", type: .error)
             return false
         }
     }
@@ -249,9 +249,9 @@ func doDirectInstall(_ device: Device) async -> Bool {
     let useLocalCopy = FileManager.default.fileExists(atPath: "/private/preboot/tmp/TrollStore.tar")
 
     if !fileManager.fileExists(atPath: "/private/preboot/tmp/trollstorehelper") {
-        Logger.log("Extracting TrollStore.tar")
+        Logger.log("正在解压 TrollStore.tar")
         if !extractTrollStore(useLocalCopy) {
-            Logger.log("Failed to extract TrollStore.tar", type: .error)
+            Logger.log("解压 TrollStore.tar 失败", type: .error)
             return false
         }
     }
@@ -268,30 +268,30 @@ func doDirectInstall(_ device: Device) async -> Bool {
     
     if persistenceID != "" {
         if install_persistence_helper(persistenceID) {
-            Logger.log("Successfully installed persistence helper!", type: .success)
+            Logger.log("持久化助手安装成功！", type: .success)
         } else {
-            Logger.log("Failed to install persistence helper", type: .error)
+            Logger.log("持久化助手安装失败", type: .error)
         }
     }
     
-    Logger.log("Installing TrollStore")
+    Logger.log("正在安装 TrollStore")
     if !install_trollstore(useLocalCopy ? "/private/preboot/tmp/TrollStore.tar" : Bundle.main.bundlePath + "/TrollStore.tar") {
-        Logger.log("Failed to install TrollStore", type: .error)
+        Logger.log("安装 TrollStore 失败", type: .error)
     } else {
-        Logger.log("Successfully installed TrollStore!", type: .success)
+        Logger.log("TrollStore 安装成功！", type: .success)
     }
     
     if !cleanupPrivatePreboot() {
-        Logger.log("Failed to clean up /private/preboot", type: .error)
+        Logger.log("清理 /private/preboot 失败", type: .error)
     }
     
     if !supportsFullPhysRW {
         if !drop_root_krw(iOS14) {
-            Logger.log("Failed to drop root privileges", type: .error)
+            Logger.log("释放 root 权限失败", type: .error)
             return false
         }
         if !exploit.deinitialise() {
-            Logger.log("Failed to deinitialise \(exploit.name)", type: .error)
+            Logger.log("释放 \(exploit.name) 失败", type: .error)
             return false
         }
     }
@@ -302,7 +302,7 @@ func doDirectInstall(_ device: Device) async -> Bool {
 func doIndirectInstall(_ device: Device) async -> Bool {
     let exploit = selectExploit(device)
     
-    Logger.log("Running on an \(device.modelIdentifier) on iOS \(device.version.readableString)")
+    Logger.log("当前设备：\(device.modelIdentifier)，iOS \(device.version.readableString)")
     
     if !extractTrollStoreIndirect() {
         return false
@@ -312,26 +312,26 @@ func doIndirectInstall(_ device: Device) async -> Bool {
     }
     
     if !(getKernel(device)) {
-        Logger.log("Failed to get kernel", type: .error)
+        Logger.log("获取内核失败", type: .error)
     }
     
-    Logger.log("Gathering kernel information")
+    Logger.log("正在分析内核信息")
     if !initialise_kernel_info(kernelPath, false) {
-        Logger.log("Failed to patchfind kernel", type: .error)
+        Logger.log("内核分析失败", type: .error)
         return false
     }
     
-    Logger.log("Exploiting kernel (\(exploit.name))")
+    Logger.log("正在利用内核漏洞 (\(exploit.name))")
     if !exploit.initialise() {
-        Logger.log("Failed to exploit the kernel", type: .error)
+        Logger.log("内核利用失败", type: .error)
         return false
     }
     defer {
         if !exploit.deinitialise() {
-            Logger.log("Failed to deinitialise \(exploit.name)", type: .error)
+            Logger.log("释放 \(exploit.name) 失败", type: .error)
         }
     }
-    Logger.log("Successfully exploited the kernel", type: .success)
+    Logger.log("内核利用成功！", type: .success)
     post_kernel_exploit(false)
     
     var path: UnsafePointer<CChar>? = nil
@@ -339,7 +339,7 @@ func doIndirectInstall(_ device: Device) async -> Bool {
         UnsafeMutablePointer<UnsafePointer<CChar>?>.init(ptr)
     }
     if is_persistence_helper_installed(pathPointer) {
-        Logger.log("Persistence helper already installed! (\(path == nil ? "unknown" : String(cString: path!)))", type: .warning)
+        Logger.log("持久化助手已安装！(\(path == nil ? "未知" : String(cString: path!)))", type: .warning)
         return false
     }
     
@@ -373,15 +373,15 @@ func doIndirectInstall(_ device: Device) async -> Bool {
     }
     var success = false
     if !install_persistence_helper_via_vnode(pathToInstall) {
-        Logger.log("Failed to install persistence helper", type: .error)
+        Logger.log("持久化助手安装失败", type: .error)
     } else {
-        Logger.log("Successfully installed persistence helper!", type: .success)
+        Logger.log("持久化助手安装成功！", type: .success)
         success = true
     }
     
     if success {
         let verbose = TIXDefaults().bool(forKey: "verbose")
-        Logger.log("Respringing in \(verbose ? "15" : "5") seconds")
+        Logger.log("即将重启桌面（\(verbose ? "15" : "5") 秒后）")
         DispatchQueue.global().async {
             sleep(verbose ? 15 : 5)
             restartBackboard()

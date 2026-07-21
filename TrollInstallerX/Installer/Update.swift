@@ -39,7 +39,7 @@ let bundledVersion = Version("2.1")
 let OFFLINE_MODE = true
 func getUpdatedTrollStore() async {
     guard !OFFLINE_MODE else {
-        Logger.log("Offline mode: using bundled TrollStore.tar (no network)", type: .info)
+        Logger.log("离线模式：使用内嵌 TrollStore.tar（无网络）", type: .info)
         return
     }
     var outOfDate = false

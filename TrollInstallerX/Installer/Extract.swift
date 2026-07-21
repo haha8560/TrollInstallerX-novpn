@@ -65,7 +65,7 @@ func extractTrollStoreIndirect() -> Bool {
             try? fm.removeItem(at: extractPath)
         }
         if libarchive_unarchive(local.path, extractPath.path) != 0 {
-            Logger.log("Failed to extract TrollStore", type: .error)
+            Logger.log("解压 TrollStore 失败", type: .error)
             return false
         }
     } else {
@@ -75,7 +75,7 @@ func extractTrollStoreIndirect() -> Bool {
                 do {
                     try fm.copyItem(at: bundledTar, to: copyPath)
                 } catch {
-                    Logger.log("Failed to copy TrollStore.tar", type: .error)
+                    Logger.log("复制 TrollStore.tar 失败", type: .error)
                     print("Failed to copy TrollStore.tar - \(error.localizedDescription)")
                     return false
                 }
@@ -84,7 +84,7 @@ func extractTrollStoreIndirect() -> Bool {
             }
         }
         if libarchive_unarchive(copyPath.path, extractPath.path) != 0 {
-            Logger.log("Failed to extract TrollStore", type: .error)
+            Logger.log("解压 TrollStore 失败", type: .error)
             return false
         }
         
@@ -101,7 +101,7 @@ func extractTrollStoreIndirect() -> Bool {
         try fm.copyItem(at: rootHelperPath, to: rootHelperCopy)
         try fm.copyItem(at: persistenceHelperPath, to: persistenceHelperCopy)
     } catch {
-        Logger.log("Failed to copy executables", type: .error)
+        Logger.log("复制可执行文件失败", type: .error)
         print("Failed to copy \(fm.fileExists(atPath: rootHelperCopy.path) ? "persistence helper" : "root helper") - \(error.localizedDescription)")
         return false
     }

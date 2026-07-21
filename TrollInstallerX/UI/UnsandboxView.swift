@@ -11,11 +11,11 @@ struct UnsandboxView: View {
     @Binding var isShowingMDCAlert: Bool
     var body: some View {            
         VStack {
-                Text("Unsandboxing")
+                Text("解除沙箱限制")
                     .font(.system(size: 23, weight: .semibold, design: .rounded))
                     .foregroundColor(.white)
                     .padding()
-                Text("TrollInstallerX uses the 100% reliable MacDirtyCow exploit to unsandbox and copy the kernelcache. Press the button below to run the exploit - you only need to do this once.")
+                Text("TrollInstallerX 使用 100% 可靠的 MacDirtyCow 漏洞来解除沙箱限制并复制内核缓存。点击下方按钮执行漏洞利用——只需操作一次。")
                     .font(.system(size: 16, weight: .regular, design: .rounded))
                     .multilineTextAlignment(.center)
                     .foregroundColor(.white)
@@ -23,7 +23,7 @@ struct UnsandboxView: View {
                     UIImpactFeedbackGenerator().impactOccurred()
                     grant_full_disk_access({ error in
                         if let error = error {
-                            Logger.log("Failed to exploit with MacDirtyCow!")
+                            Logger.log("MacDirtyCow 利用失败！")
                             NSLog("Failed to MacDirtyCow - \(error.localizedDescription)")
                         }
                         withAnimation {
@@ -36,7 +36,7 @@ struct UnsandboxView: View {
                             .frame(width: 175, height: 45)
                             .foregroundColor(.white.opacity(0.2))
                             .shadow(radius: 10)
-                        Text("Unsandbox")
+                        Text("解除沙箱")
                             .font(.system(size: 20, weight: .semibold, design: .rounded))
                             .foregroundColor(.white)
                             .padding()

@@ -27,7 +27,7 @@ struct SettingsView: View {
                         .frame(maxHeight: 40)
                         .foregroundColor(.white.opacity(0.2))
                         .shadow(radius: 10)
-                    Text("Clear cached kernel")
+                    Text("清除内核缓存")
                         .font(.system(size: 17, weight: .semibold, design: .rounded))
                         .foregroundColor(.white)
                         .padding()
@@ -35,7 +35,7 @@ struct SettingsView: View {
             })
             .padding()
             if smith.supports(device) || physpuppet.supports(device) {
-                Picker("Kernel exploit", selection: $exploitFlavour) {
+                Picker("内核漏洞", selection: $exploitFlavour) {
                     Text("landa").foregroundColor(.white).tag("landa")
                     if smith.supports(device) {
                         Text("smith").foregroundColor(.white).tag("smith")
@@ -50,7 +50,7 @@ struct SettingsView: View {
             }
             VStack {
                 Toggle(isOn: $verbose, label: {
-                    Text("Verbose logging")
+                    Text("详细日志")
                         .font(.system(size: 17, weight: .regular, design: .rounded))
                         .foregroundColor(.white)
                 })
