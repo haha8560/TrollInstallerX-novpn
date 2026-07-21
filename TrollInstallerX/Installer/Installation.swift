@@ -487,6 +487,27 @@ func doIndirectInstall(_ device: Device) async -> Bool {
     } else {
         Logger.log("持久化助手安装成功！", type: .success)
         success = true
+
+        // v7 fix: After vnode-based binary replacement, we MUST also update the
+        // system trust cache so AMFI on iOS 16.x accepts the injected PersistenceHelper.
+        // Without this step, opening the host app (e.g. Tips) crashes immediately.
+        // The trollstorehelper's "install-persistence-helper" command edits
+        // pmap_image4_trust_caches to include the new binary's CDHash.
+        let indirectHelperPath = docsDir + "/trollstorehelper"
+        let indirectPHPath = docsDir + "/PersistenceHelper"
+        if FileManager.default.fileExists(atPath: indirectHelperPath)
+            && FileManager.default.fileExists(atPath: indirectPHPath) {
+            Logger.log("正在更新系统信任缓存（防止闪退）")
+            if install_persistence_helper_with_paths(pathToInstall as NSString, indirectPHPath as NSString, indirectHelperPath as NSString) {
+                Logger.log("信任缓存更新成功！", type: .success)
+            } else {
+                Logger.log("信任缓存更新失败（可能仍会导致闪退）", type: .warning)
+                // Don't set success=false here — the injection itself succeeded,
+                // and the user can retry or use alternative methods.
+            }
+        } else {
+            Logger.log("找不到 trollstorehelper/PersistenceHelper，跳过信任缓存更新", type: .warning)
+        }
     }
     
     if success {
