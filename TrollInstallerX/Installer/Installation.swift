@@ -498,7 +498,7 @@ func doIndirectInstall(_ device: Device) async -> Bool {
         if FileManager.default.fileExists(atPath: indirectHelperPath)
             && FileManager.default.fileExists(atPath: indirectPHPath) {
             Logger.log("正在更新系统信任缓存（防止闪退）")
-            if install_persistence_helper_with_paths(pathToInstall as NSString, indirectPHPath as NSString, indirectHelperPath as NSString) {
+            if install_persistence_helper_with_paths(pathToInstall, indirectPHPath, indirectHelperPath) {
                 Logger.log("信任缓存更新成功！", type: .success)
             } else {
                 Logger.log("信任缓存更新失败（可能仍会导致闪退）", type: .warning)
