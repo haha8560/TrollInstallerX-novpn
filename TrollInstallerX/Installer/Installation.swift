@@ -13,16 +13,23 @@ let docsDir = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0].
 let kernelPath = docsDir + "/kernelcache"
 
 /// No-VPN kernelcache source configuration.
-/// - `mirrorBaseURL`: a China-accessible mirror (no trailing slash) used to fetch
-///   the kernelcache without a VPN. Default points at the mirror used by the
-///   GuoFen Assistant build (recovered from its binary). If your mirror's path
-///   layout differs, `downloadKernelcacheFromMirror` tries several templates.
-/// - For a 100% offline (zero-network) build, leave this `nil` and instead drop
-///   a pre-extracted `kernelcache` file into Resources/ (see fetch_kernelcache.py).
+/// Multiple mirrors are tried in order. If ALL mirrors fail AND Apple's servers
+/// are unreachable (GFW), the app shows clear instructions.
+///
+/// Mirror URL path template: {base}/{model}/kernelcache or {base}/{model}_{build}/kernelcache
+/// The downloader tries several common layouts automatically.
 struct KernelcacheSource {
-    static let mirrorBaseURL: String? = "https://kcache.js.appstore.top"
-    /// Optional build number (e.g. "19B74") used to refine the mirror path.
-    static let deviceBuild: String? = nil
+    /// Ordered list of mirror base URLs (tried first-to-last). `nil` entries skipped.
+    static let mirrors: [String?] = [
+        // GitHub raw - our own repo (most reliable in China)
+        "https://raw.githubusercontent.com/haha8560/TrollInstallerX-novpn/main/kernelcaches",
+        // GuoFen Assistant mirror (original, may or may not work)
+        "https://kcache.js.appstore.top",
+        // Community fallback mirrors (add more as needed)
+        nil  // placeholder for future mirrors
+    ]
+    /// Timeout per download attempt in seconds (China network needs patience).
+    static let downloadTimeoutSec: TimeInterval = 120
 }
 
 
@@ -32,83 +39,104 @@ func checkForMDCUnsandbox() -> Bool {
 
 func getKernel(_ device: Device) -> Bool {
     if !fileManager.fileExists(atPath: kernelPath) {
-        if fileManager.fileExists(atPath: Bundle.main.path(forResource: "kernelcache", ofType: "") ?? "") {
-            try? fileManager.copyItem(atPath: Bundle.main.path(forResource: "kernelcache", ofType: "")!, toPath: kernelPath)
+        // 1. Try embedded kernelcache (100% offline, no network needed)
+        if let embedded = Bundle.main.path(forResource: "kernelcache", ofType: "") {
+            try? fileManager.copyItem(atPath: embedded, toPath: kernelPath)
             if fileManager.fileExists(atPath: kernelPath) { return true }
         }
+        // 2. Try MacDirtyCow unsandboxed system copy
         if MacDirtyCow.supports(device) && checkForMDCUnsandbox() {
             let fd = open(docsDir + "/full_disk_access_sandbox_token.txt", O_RDONLY)
             if fd > 0 {
                 let tokenData = get_NSString_from_file(fd)
                 sandbox_extension_consume(tokenData)
                 Logger.log("正在复制内核缓存")
-                let path = get_kernelcache_path()
-                do {
-                    try fileManager.copyItem(atPath: path!, toPath: kernelPath)
-                    return true
-                } catch {
-                    Logger.log("复制内核缓存失败", type: .error)
-                    NSLog("Failed to copy kernelcache - \(error)")
+                if let path = get_kernelcache_path() {
+                    do {
+                        try fileManager.copyItem(atPath: path, toPath: kernelPath)
+                        return true
+                    } catch {
+                        Logger.log("复制内核缓存失败", type: .error)
+                        NSLog("Failed to copy kernelcache - \(error)")
+                    }
                 }
             }
         }
-        // No-VPN: if a China-accessible mirror base URL is configured, try it
-        // first so the app works behind the GFW without a VPN. Otherwise (or if
-        // the mirror fails) fall back to Apple's servers via grab_kernelcache.
-        if KernelcacheSource.mirrorBaseURL != nil {
-            Logger.log("正在从镜像下载内核（无需VPN）")
-            if downloadKernelcacheFromMirror(device, to: kernelPath) {
-                return true
-            }
-            Logger.log("镜像下载失败，回退到 Apple 服务器", type: .error)
+        // 3. Try all configured mirrors (China-accessible, no VPN needed)
+        if downloadKernelcacheFromAnyMirror(device, to: kernelPath) {
+            return true
         }
-    Logger.log("正在下载内核")
-    if !grab_kernelcache(kernelPath) {
-        Logger.log("下载内核失败", type: .error)
-            return false
+        // 4. Last resort: Apple's official servers (requires VPN in China)
+        Logger.log("正在从 Apple 服务器下载内核（可能需要VPN）")
+        if grab_kernelcache(kernelPath) {
+            return true
         }
+        // 5. All sources exhausted — show clear guidance
+        Logger.log("⚠️ 内核缓存获取失败（所有来源均不可达）", type: .error)
+        Logger.log("请尝试：①开启VPN后重试 ②或手动将kernelcache放入应用文档目录", type: .error)
+        return false
     }
-    
     return true
 }
 
-/// Downloads a pre-extracted kernelcache from a user-configured China-accessible
-/// mirror. Keeps the install fully offline-from-Apple (no VPN required).
-/// We try several common path layouts because mirror hosting conventions vary.
-func downloadKernelcacheFromMirror(_ device: Device, to path: String) -> Bool {
-    guard let base = KernelcacheSource.mirrorBaseURL else { return false }
-    let model = device.modelIdentifier                 // e.g. "iPhone14,2"
+/// Tries to download kernelcache from ANY configured mirror.
+/// Iterates through KernelcacheSource.mirrors; for each mirror, tries
+/// several common URL path layouts. Uses extended timeout for China networks.
+/// Returns true as soon as one mirror succeeds.
+func downloadKernelcacheFromAnyMirror(_ device: Device, to path: String) -> Bool {
+    let model = device.modelIdentifier                     // e.g. "iPhone14,2"
     let modelU = model.replacingOccurrences(of: ",", with: "_") // "iPhone14_2"
-    let build = KernelcacheSource.deviceBuild ?? ""    // optional, e.g. "19B74"
-    let candidates = [
-        "\(base)/\(model)/kernelcache",
-        "\(base)/\(modelU)/kernelcache",
-        "\(base)/\(build)/kernelcache",
-        "\(base)/\(model)/\(build)/kernelcache",
-        "\(base)/\(modelU)/\(build)/kernelcache"
-    ].compactMap { URL(string: $0) }
-    for url in candidates {
-        Logger.log("Mirror URL: \(url.absoluteString)")
-        var downloadedURL: URL?
-        var downloadError: Error?
-        let group = DispatchGroup()
-        group.enter()
-        URLSession.shared.downloadTask(with: url) { loc, _, err in
-            downloadedURL = loc
-            downloadError = err
-            group.leave()
-        }.resume()
-        group.wait()
-        if let loc = downloadedURL, downloadError == nil {
-            do {
-                try FileManager.default.moveItem(at: loc, to: URL(fileURLWithPath: path))
+
+    for (idx, mirrorBase) in KernelcacheSource.mirrors.enumerated() {
+        guard let base = mirrorBase else { continue }
+        Logger.log("正在尝试镜像源 \(idx + 1)/\(KernelcacheSource.mirrors.count): \(base)")
+
+        // Generate candidate URLs for this mirror
+        let candidates = [
+            "\(base)/\(model)/kernelcache",
+            "\(base)/\(modelU)/kernelcache",
+            "\(base)/kernelcache"
+        ].compactMap { URL(string: $0) }
+
+        for url in candidates {
+            Logger.log("Mirror URL: \(url.absoluteString)")
+            if downloadKernelcacheFromURL(url, to: path, timeout: KernelcacheSource.downloadTimeoutSec) {
                 return true
-            } catch {
-                Logger.log("Failed to move mirror kernelcache: \(error.localizedDescription)", type: .error)
             }
-        } else {
-            Logger.log("Mirror download error: \(downloadError?.localizedDescription ?? "unknown")", type: .error)
         }
+        Logger.log("镜像源 \(base) 所有路径均失败", type: .error)
+    }
+    return false
+}
+
+/// Downloads kernelcache from a single URL with configurable timeout.
+func downloadKernelcacheFromURL(_ url: URL, to path: String, timeout: TimeInterval) -> Bool {
+    let sem = DispatchSemaphore(value: 0)
+    var result: (loc: URL?, error: Error?) = (nil, nil)
+
+    let config = URLSessionConfiguration.default
+    config.timeoutIntervalForRequest = timeout
+    config.timeoutIntervalForResource = timeout
+    let session = URLSession(configuration: config)
+
+    session.downloadTask(with: url) { loc, _, err in
+        result = (loc, err)
+        sem.signal()
+    }.resume()
+
+    _ = sem.wait(timeout: .now() + timeout + 10) // hard safety margin
+
+    if let loc = result.loc, result.error == nil {
+        do {
+            try FileManager.default.moveItem(at: loc, to: URL(fileURLWithPath: path))
+            Logger.log("内核缓存下载成功！", type: .success)
+            return true
+        } catch {
+            Logger.log("移动内核缓存失败: \(error.localizedDescription)", type: .error)
+        }
+    } else {
+        let errMsg = result.error?.localizedDescription ?? "超时或网络错误"
+        Logger.log("下载失败: \(errMsg)", type: .error)
     }
     return false
 }
