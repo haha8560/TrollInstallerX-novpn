@@ -50,9 +50,13 @@ bool install_persistence_helper(NSString *app) {
     NSString *stdout;
     NSString *helperPath = @"/private/preboot/tmp/trollstorehelper";
     NSString *persistenceHelperPath = @"/private/preboot/tmp/TrollStore/TrollStore.app/PersistenceHelper";
+    printf("install_persistence_helper: helper=%s, app=%s, ph=%s\n",
+           helperPath.UTF8String, app.UTF8String, persistenceHelperPath.UTF8String);
+    chmod(helperPath.UTF8String, 0755);
+    chown(helperPath.UTF8String, 0, 0);
     int ret = run_binary(helperPath, @[@"install-persistence-helper", app, persistenceHelperPath, helperPath], &stdout);
     printf("trollstorehelper returned %d\n", ret);
-    printf("trollstorehelper output: %s\n", [stdout UTF8String]);
+    printf("trollstorehelper output:\n%s\n", [stdout UTF8String] ?: "(empty)");
     return ret == 0;
 }
 
