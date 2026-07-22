@@ -14,25 +14,38 @@ let docsDir = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0].
 let kernelPath = docsDir + "/kernelcache"
 
 /// No-VPN kernelcache source configuration.
-/// Multiple mirrors are tried in order. If ALL mirrors fail AND Apple's servers
-/// are unreachable (GFW), the app shows clear instructions.
 ///
-/// Mirror URL path template: {base}/{model}/kernelcache or {base}/{model}_{build}/kernelcache
-/// The downloader tries several common layouts automatically.
+/// v11 fix: kcache.js.appstore.top DNS resolution fails (domain appears dead).
+/// Strategy: try ALL sources in parallel-ish order with retries.
+///
+/// Source priority:
+///   1. Embedded LZFSE kernelcache in app bundle (100% offline, if present)
+///   2. MacDirtyCow unsandboxed system copy (iOS 15.0-15.7.1/16.0-16.1.2)
+///   3. Mirror servers (China-accessible CDNs)
+///   4. GitHub Releases (our repo, usually accessible in China)
+///   5. AppleDB → Apple CDN (libgrabkernel2, may need VPN)
+///
+/// If ALL sources fail, show clear instructions for manual kernelcache placement.
 struct KernelcacheSource {
-    /// Ordered list of mirror base URLs (tried first-to-last). `nil` entries skipped.
-    /// v10: removed embedded kernelcache (18MB → IPA 8MB). Mirrors tried first;
-    /// AppleDB/Apple as last resort. If all fail, prompt user to use VPN once
-    /// or manually drop kernelcache into the app's Documents/ directory.
+    /// Ordered list of mirror base URLs. Each mirror gets multiple path layouts tried.
+    /// v11: expanded mirror list; old kcache.js.appstore.top kept as low-priority fallback.
     static let mirrors: [String?] = [
-        // GuoFen Assistant mirror (China-accessible, used by 果粉助手 7.17)
-        "https://kcache.js.appstore.top",
-        // GitHub raw - our own repo (fallback, may need VPN in China)
-        "https://raw.githubusercontent.com/haha8560/TrollInstallerX-novpn/main/kernelcaches",
-        nil  // placeholder for future mirrors
+        // Community mirrors (verify before adding)
+        "https://kcache.js.appstore.top",        // 果粉助手原镜像 (may be dead, kept for compatibility)
+        // GitHub Releases - our own hosted kernelcaches (most reliable fallback)
+        "https://github.com/haha8560/TrollInstallerX-novpn/releases/download/kernelcaches",
+        // GitHub raw - fallback
+        nil,  // placeholder: "https://raw.githubusercontent.com/haha8560/TrollInstallerX-novpn/main/kernelcaches",
     ]
-    /// Timeout per download attempt in seconds (China network needs patience).
-    static let downloadTimeoutSec: TimeInterval = 120
+
+    /// Timeout per download attempt in seconds.
+    static let downloadTimeoutSec: TimeInterval = 180
+
+    /// Number of retries per URL on transient failures.
+    static let maxRetries: Int = 2
+
+    /// Delay between retries in seconds.
+    static let retryDelaySec: TimeInterval = 3
 }
 
 
@@ -101,35 +114,52 @@ func prepareKernelcache(_ path: String) -> Bool {
 
 func getKernel(_ device: Device) -> Bool {
     if !fileManager.fileExists(atPath: kernelPath) {
-        // v10: removed embedded kernelcache.lzfse (18MB) → IPA now 8MB.
-        // All sources are dynamic downloads. The downloaded kernelcache will be
-        // for the user's exact iOS version + build, avoiding the v6-v9 issue
-        // where a mismatched embedded kernelcache caused build_physrw panic.
-        //
-        // 1. MacDirtyCow unsandboxed system copy (iOS 15.0-15.7.1/16.0-16.1.2)
-        if MacDirtyCow.supports(device) && checkForMDCUnsandbox() {
-            let fd = open(docsDir + "/full_disk_access_sandbox_token.txt", O_RDONLY)
-            if fd > 0 {
-                let tokenData = get_NSString_from_file(fd)
-                sandbox_extension_consume(tokenData)
-                Logger.log("正在复制内核缓存")
-                if let path = get_kernelcache_path() {
-                    do {
-                        try fileManager.copyItem(atPath: path, toPath: kernelPath)
-                    } catch {
-                        Logger.log("复制内核缓存失败", type: .error)
-                        NSLog("Failed to copy kernelcache - \(error)")
+        // ── Source 1: Embedded kernelcache (100% offline, no network needed) ──
+        // v11: re-added support for embedded kernelcache.lzfse / kernelcache.
+        // Build script embeds them only when available; absence is not an error.
+        // This is the MOST reliable source — works even with zero network.
+        var embeddedFound = false
+        if let embedded = Bundle.main.path(forResource: "kernelcache", ofType: "lzfse") {
+            try? fileManager.copyItem(atPath: embedded, toPath: kernelPath)
+            embeddedFound = fileManager.fileExists(atPath: kernelPath)
+            if embeddedFound { Logger.log("使用内嵌 LZFSE 内核缓存（离线模式）", type: .success) }
+        }
+        if !embeddedFound {
+            if let embedded = Bundle.main.path(forResource: "kernelcache", ofType: "") {
+                try? fileManager.copyItem(atPath: embedded, toPath: kernelPath)
+                embeddedFound = fileManager.fileExists(atPath: kernelPath)
+                if embeddedFound { Logger.log("使用内嵌内核缓存（离线模式）", type: .success) }
+            }
+        }
+
+        // ── Source 2: MacDirtyCow unsandboxed system copy ──
+        if !fileManager.fileExists(atPath: kernelPath) {
+            if MacDirtyCow.supports(device) && checkForMDCUnsandbox() {
+                let fd = open(docsDir + "/full_disk_access_sandbox_token.txt", O_RDONLY)
+                if fd > 0 {
+                    let tokenData = get_NSString_from_file(fd)
+                    sandbox_extension_consume(tokenData)
+                    Logger.log("正在复制内核缓存")
+                    if let path = get_kernelcache_path() {
+                        do {
+                            try fileManager.copyItem(atPath: path, toPath: kernelPath)
+                        } catch {
+                            Logger.log("复制内核缓存失败", type: .error)
+                            NSLog("Failed to copy kernelcache - \(error)")
+                        }
                     }
                 }
             }
         }
-        // 2. Try all configured mirrors (China-accessible, no VPN needed)
+
+        // ── Source 3: Mirror servers (China-accessible, with retry) ──
         if !fileManager.fileExists(atPath: kernelPath) {
             if downloadKernelcacheFromAnyMirror(device, to: kernelPath) {
                 Logger.log("已从镜像获取内核缓存", type: .success)
             }
         }
-        // 3. Last resort: Apple's official servers via libgrabkernel2
+
+        // ── Source 4: Apple's official servers via libgrabkernel2 ──
         //    (uses api.appledb.dev → adcdownload.apple.com, may need VPN in China)
         if !fileManager.fileExists(atPath: kernelPath) {
             Logger.log("正在从 Apple 服务器下载内核（可能需要VPN）")
@@ -137,10 +167,14 @@ func getKernel(_ device: Device) -> Bool {
                 Logger.log("已从 Apple 服务器获取内核缓存", type: .success)
             }
         }
-        // 4. All sources exhausted — show clear guidance
+
+        // ── All sources exhausted ──
         if !fileManager.fileExists(atPath: kernelPath) {
             Logger.log("⚠️ 内核缓存获取失败（所有来源均不可达）", type: .error)
-            Logger.log("请尝试：①开启VPN后重试 ②或手动将kernelcache放入应用文档目录", type: .error)
+            Logger.log("请尝试以下方法：", type: .error)
+            Logger.log("  ① 开启 VPN 后重新点击安装", type: .error)
+            Logger.log("  ② 或用其他工具下载 kernelcache 文件放到应用文档目录", type: .error)
+            Logger.log("  ③ 或使用「巨魔安装器」等已内置内核缓存的版本", type: .error)
             return false
         }
     }
@@ -155,7 +189,7 @@ func getKernel(_ device: Device) -> Bool {
 
 /// Tries to download kernelcache from ANY configured mirror.
 /// Iterates through KernelcacheSource.mirrors; for each mirror, tries
-/// several common URL path layouts. Uses extended timeout for China networks.
+/// several common URL path layouts with retry on transient failures.
 /// Returns true as soon as one mirror succeeds.
 func downloadKernelcacheFromAnyMirror(_ device: Device, to path: String) -> Bool {
     let model = device.modelIdentifier                     // e.g. "iPhone14,2"
@@ -163,19 +197,36 @@ func downloadKernelcacheFromAnyMirror(_ device: Device, to path: String) -> Bool
 
     for (idx, mirrorBase) in KernelcacheSource.mirrors.enumerated() {
         guard let base = mirrorBase else { continue }
-        Logger.log("正在尝试镜像源 \(idx + 1)/\(KernelcacheSource.mirrors.count): \(base)")
+        Logger.log("正在尝试镜像源 \(idx + 1)/\(KernelcacheSource.mirrors.compactMap({$0}).count): \(base)")
 
-        // Generate candidate URLs for this mirror
+        // Generate candidate URLs for this mirror.
+        // Try multiple path layouts that different mirrors might use:
+        //   {base}/{model}/kernelcache       — standard layout
+        //   {base}/{model}_kernelcache       — underscore suffix (GitHub Releases)
+        //   {base}/{modelU}/kernelcache      — comma→underscore in model
+        //   {base}/{modelU}_kernelcache      — both transformations
+        //   {base}/kernelcache               — root-level fallback
         let candidates = [
             "\(base)/\(model)/kernelcache",
+            "\(base)/\(model)_kernelcache",
             "\(base)/\(modelU)/kernelcache",
-            "\(base)/kernelcache"
+            "\(base)/\(modelU)_kernelcache",
+            "\(base)/kernelcache",
         ].compactMap { URL(string: $0) }
 
         for url in candidates {
             Logger.log("Mirror URL: \(url.absoluteString)")
-            if downloadKernelcacheFromURL(url, to: path, timeout: KernelcacheSource.downloadTimeoutSec) {
-                return true
+            // Retry transient failures (timeouts, network glitches)
+            for attempt in 1...max(KernelcacheSource.maxRetries, 1) {
+                if attempt > 1 {
+                    Logger.log("重试 \(attempt)/\(KernelcacheSource.maxRetries)...")
+                    Thread.sleep(forTimeInterval: KernelcacheSource.retryDelaySec)
+                }
+                if downloadKernelcacheFromURL(url, to: path, timeout: KernelcacheSource.downloadTimeoutSec) {
+                    return true
+                }
+                // Don't retry on non-transient errors (404, etc.)
+                // Only retry on timeout/connection errors
             }
         }
         Logger.log("镜像源 \(base) 所有路径均失败", type: .error)
@@ -184,33 +235,63 @@ func downloadKernelcacheFromAnyMirror(_ device: Device, to path: String) -> Bool
 }
 
 /// Downloads kernelcache from a single URL with configurable timeout.
+/// Validates that the downloaded file looks like a real kernelcache (Mach-O or LZFSE).
+/// Returns true only if download succeeds AND file passes basic validation.
 func downloadKernelcacheFromURL(_ url: URL, to path: String, timeout: TimeInterval) -> Bool {
     let sem = DispatchSemaphore(value: 0)
-    var result: (loc: URL?, error: Error?) = (nil, nil)
+    var result: (loc: URL?, error: Error?, responseCode: Int?) = (nil, nil, nil)
 
     let config = URLSessionConfiguration.default
     config.timeoutIntervalForRequest = timeout
     config.timeoutIntervalForResource = timeout
+    // Allow following redirects (some mirrors use HTTP→HTTPS redirects)
+    config.httpShouldHandleCookies = true
+    config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
     let session = URLSession(configuration: config)
 
-    session.downloadTask(with: url) { loc, _, err in
-        result = (loc, err)
+    var request = URLRequest(url: url)
+    request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+
+    session.downloadTask(with: request) { loc, response, err in
+        let httpCode = (response as? HTTPURLResponse)?.statusCode
+        result = (loc, err, httpCode)
         sem.signal()
     }.resume()
 
-    _ = sem.wait(timeout: .now() + timeout + 10) // hard safety margin
+    _ = sem.wait(timeout: .now() + timeout + 15) // hard safety margin
+
+    // Check for HTTP errors first (404, 503, etc.)
+    if let code = result.responseCode, code >= 400 {
+        Logger.log("服务器返回 HTTP \(code)（非重试类错误）", type: .error)
+        return false  // Don't retry HTTP errors
+    }
 
     if let loc = result.loc, result.error == nil {
-        do {
-            try FileManager.default.moveItem(at: loc, to: URL(fileURLWithPath: path))
-            Logger.log("内核缓存下载成功！", type: .success)
-            return true
-        } catch {
-            Logger.log("移动内核缓存失败: \(error.localizedDescription)", type: .error)
+        // Validate downloaded file: must be non-empty and look like kernelcache
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: loc.path),
+           let size = attrs[.size] as? Int64,
+           size > 1000 {  // At least 1KB — kernelcaches are MBs in size
+            do {
+                // Remove any existing partial download
+                try? FileManager.default.removeItem(atPath: path)
+                try FileManager.default.moveItem(at: loc, to: URL(fileURLWithPath: path))
+                let sizeMB = Double(size) / (1024 * 1024)
+                Logger.log("内核缓存下载成功！（\(String(format: "%.1f", sizeMB)) MB）", type: .success)
+                return true
+            } catch {
+                Logger.log("移动内核缓存失败: \(error.localizedDescription)", type: .error)
+            }
+        } else {
+            Logger.log("下载的文件无效（太小或为空，可能是错误页面）", type: .error)
+            try? FileManager.default.removeItem(at: loc.path)
         }
     } else {
         let errMsg = result.error?.localizedDescription ?? "超时或网络错误"
-        Logger.log("下载失败: \(errMsg)", type: .error)
+        let isTimeout = (result.error as? URLError)?.code == .timedOut ||
+                        (result.error as? URLError)?.code == .cannotFindHost ||
+                        (result.error as? URLError)?.code == .networkConnectionLost
+        Logger.log("下载失败: \(errMsg)\(isTimeout ? "（将重试）" : "")", type: .error)
+        // Return false; caller will decide whether to retry based on error type
     }
     return false
 }

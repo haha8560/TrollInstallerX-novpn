@@ -29,19 +29,30 @@ xcodebuild -configuration "$CONFIG" \
 APP_DIR="DerivedData/$SCHEME/Build/Products/$CONFIG-iphoneos"
 cp Resources/ents.plist "$APP_DIR/"
 
-# v10: removed embedded kernelcache.lzfse (18MB) — was causing build_physrw
-# kernel panic when the embedded build did not match the user's exact iOS build
-# (e.g. 20F75 embedded but user's device on 20F66). Now uses dynamic download
-# from kcache.js.appstore.top (no VPN) → AppleDB → Apple (VPN). IPA drops
-# from 26MB to 8MB, matching 果粉助手 size.
+# v11: optional embedded kernelcache support.
+# If kernelcaches/<model>/kernelcache exists, embed as kernelcache.lzfse in the app bundle.
+# This enables 100% offline installation for that specific device+version combo.
+# The IPA size increases by ~17MB per embedded kernelcache.
 #
-# To temporarily re-enable offline embedding for a SPECIFIC build you trust,
-# uncomment the block below and drop the LZFSE file at kernelcaches/<model>/kernelcache:
+# To use: place LZFSE-compressed kernelcache at kernelcaches/<model>/kernelcache
+# Example: kernelcaches/iPhone8,1/kernelcache  (for iPhone 8)
 #
-# if [ -f kernelcaches/iPhone14,2/kernelcache ]; then
-#   cp kernelcaches/iPhone14,2/kernelcache "$APP_DIR/$SCHEME.app/kernelcache.lzfse"
-#   echo "-> Embedded kernelcaches/iPhone14,2/kernelcache as kernelcache.lzfse (offline install enabled)"
-# fi
+# The app's getKernel() checks Bundle.main.path(forResource:"kernelcache", ofType:"lzfse")
+# first before trying network download. No embedded file = pure network mode (8MB IPA).
+EMBEDDED_COUNT=0
+for kc in kernelcaches/*/kernelcache; do
+  [ -f "$kc" ] || continue
+  MODEL_DIR=$(dirname "$kc")
+  MODEL_NAME=$(basename "$MODEL_DIR")
+  cp "$kc" "$APP_DIR/$SCHEME.app/kernelcache.lzfse"
+  echo "-> Embedded $kc as kernelcache.lzfse (offline install for $MODEL_NAME)"
+  EMBEDDED_COUNT=$((EMBEDDED_COUNT + 1))
+done
+if [ "$EMBEDDED_COUNT" -gt 0 ]; then
+  echo "-> Total: $EMBEDDED_COUNT kernelcache(s) embedded"
+else
+  echo "-> No kernelcaches found in kernelcaches/ — will use network download at runtime"
+fi
 
 # (Legacy) raw embedded kernelcache support — kept for backward compat
 if [ -f Resources/kernelcache ]; then

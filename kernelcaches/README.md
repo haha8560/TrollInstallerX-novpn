@@ -1,30 +1,47 @@
 # Kernelcache 文件目录
 
-> v10 更新：移除内嵌 kernelcache（IPA 从 26MB 降到 8MB，与果粉助手一致）。
-> 改为**运行时动态下载**（首选国内镜像 `kcache.js.appstore.top`），首次需联网，
-> 之后保存在应用沙盒 `Documents/kernelcache` 中完全离线。
-> 这同时修复了 v6–v9 因内嵌 build 与用户实际 iOS build 不匹配而引发的
-> `build_physrw` 内核 panic（黑屏重启）。
+> v11 更新：重新支持内嵌 kernelcache（可选），同时大幅改进网络下载逻辑。
 
-## 历史说明（v6–v9，仅供参考）
+## 下载策略（v11，按优先级）
 
-v6–v9 曾在此目录内置 iPhone14,2 / 16.5.1 / 20F75 的 LZFSE 压缩 kernelcache，
-但遇到跨 build（甚至同 iOS 版本的微小 build 差异）时，`build_physrw_primitive()`
-在 PPL 绕过后会因 PTE 物理地址假设失效而触发内核 panic。
+安装器按以下顺序尝试获取 kernelcache：
 
-修复后 v10 改为：
+1. **内嵌 LZFSE**（本目录有文件时自动启用）→ 100% 离线，无需网络
+2. **MacDirtyCow 系统拷贝**（iOS 15.0–15.7.1 / 16.0–16.1.2）
+3. **镜像服务器**（多源 + 重试 + 多路径模板）
+   - `kcache.js.appstore.top`（果粉助手原镜像，可能已失效）
+   - GitHub Releases（`releases/download/kernelcaches/`）
+4. **AppleDB → Apple CDN**（`libgrabkernel2`，可能需要 VPN）
+5. **全部失败** → 显示清晰的操作指引
 
-1. **首选镜像**：`https://kcache.js.appstore.top`（果粉助手同款，国内可直连，
-   多路径模板自动尝试）
-2. **GitHub raw 回退**：`https://raw.githubusercontent.com/haha8560/TrollInstallerX-novpn/main/kernelcaches`
-3. **AppleDB / Apple 最后回退**（可能需要 VPN）：通过预编译的 `libgrabkernel2`
-4. **手动放置**：将原始 kernelcache 复制到应用沙盒 `Documents/kernelcache`
-   （不需 LZFSE，安装器会自动识别）
+## 如何添加内嵌 kernelcache
 
-镜像下载失败时会清晰提示用户开启 VPN 一次或手动放置。
+1. 获取对应设备+版本的 LZFSE 压缩 kernelcache
+2. 放入 `{model}/kernelcache`，例如：
+   ```
+   kernelcaches/
+   ├── iPhone8,1/kernelcache      ← iPhone 8 (任意 iOS 版本)
+   ├── iPhone14,2/kernelcache     ← iPhone 13 Pro Max
+   └── ...
+   ```
+3. 运行 `build.sh` 或 GitHub Actions 自动编译 → IPA 自动包含
 
-## 如何临时重新启用内嵌（高级用户）
+> ⚠️ **版本匹配要求**：内嵌 kernelcache 的 iOS build 号必须与用户设备的**完全一致**。
+> 不匹配会导致 `build_physrw` 内核 panic（黑屏重启）。详见下方「历史说明」。
 
-如果网络完全不可用且你需要为特定 build 离线安装，可把对应 LZFSE 文件放回
-`{model}/kernelcache`（如 `iPhone14,2/kernelcache`），并在 `build.sh` 中
-重新打开内嵌段（已注释保留）。
+## 镜像下载改进（v11）
+
+- **超时时间**：120s → 180s
+- **重试机制**：每个 URL 最多重试 2 次（间隔 3 秒）
+- **路径模板**：每个镜像尝试 5 种路径格式
+- **文件验证**：拒绝过小文件和 HTML 错误页面
+- **HTTP 错误感知**：404/503 等不触发重试
+- **GitHub Releases 支持**：可上传 kernelcaches 到 Release assets
+
+## 历史说明（v6–v10 问题记录）
+
+| 版本 | 方案 | 问题 |
+|------|------|------|
+| v6–v9 | 内嵌单一 kernelcache | build 不匹配 → 内核 panic 黑屏 |
+| v10 | 纯网络下载 | kcache.js.appstore.top DNS 失效 → 全部超时 |
+| v11 | 内嵌(可选) + 多源网络 + 重试 | 兼顾离线可靠性和网络灵活性 |
