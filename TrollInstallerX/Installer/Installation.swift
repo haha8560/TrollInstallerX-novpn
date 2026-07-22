@@ -220,7 +220,7 @@ func downloadKernelcacheFromAnyMirror(_ device: Device, to path: String) -> Bool
             for attempt in 1...max(KernelcacheSource.maxRetries, 1) {
                 if attempt > 1 {
                     Logger.log("重试 \(attempt)/\(KernelcacheSource.maxRetries)...")
-                    Thread.sleep(forTimeInterval: KernelcacheSource.retryDelaySec)
+                    usleep(UInt32(KernelcacheSource.retryDelaySec * 1_000_000))
                 }
                 if downloadKernelcacheFromURL(url, to: path, timeout: KernelcacheSource.downloadTimeoutSec) {
                     return true
