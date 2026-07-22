@@ -29,35 +29,50 @@ xcodebuild -configuration "$CONFIG" \
 APP_DIR="DerivedData/$SCHEME/Build/Products/$CONFIG-iphoneos"
 cp Resources/ents.plist "$APP_DIR/"
 
-# v11: optional embedded kernelcache support.
-# If kernelcaches/<model>/kernelcache exists, embed as kernelcache.lzfse in the app bundle.
-# This enables 100% offline installation for that specific device+version combo.
-# The IPA size increases by ~17MB per embedded kernelcache.
+# v12: embed MULTIPLE per-device kernelcaches for 100% offline install.
 #
-# To use: place LZFSE-compressed kernelcache at kernelcaches/<model>/kernelcache
-# Example: kernelcaches/iPhone8,1/kernelcache  (for iPhone 8)
+# Place an LZFSE-compressed kernelcache at:  kernelcaches/<Model>_<Version>/kernelcache
+#   e.g.  kernelcaches/iPhone8,1_15.8.7/kernelcache
+#         kernelcaches/iPhone14,2_16.5.1/kernelcache
+# build.sh copies each into the app bundle as:  kernelcache_<ModelU>_<Version>.lzfse
+# (commas in the model are replaced with underscores, e.g. kernelcache_iPhone14_2_16.5.1).
 #
-# The app's getKernel() checks Bundle.main.path(forResource:"kernelcache", ofType:"lzfse")
-# first before trying network download. No embedded file = pure network mode (8MB IPA).
+# The app's getKernel() picks the matching file by device model + iOS version, so a
+# single IPA can install offline on EVERY bundled device/version combo.
+#
+# Best-effort auto-fetch: if a kernelcache is missing, try downloading it from Apple's
+# CDN (works on GitHub Actions runners, which have internet, and on your own machine).
+# This makes the offline IPA buildable even if the file wasn't committed beforehand.
+
+# Devices we want baked in (device:version:build). Edit to add more models.
+FETCH_DEVICES=("iPhone8,1:15.8.7:19H384" "iPhone14,2:16.5.1:20F75")
+if command -v python3 >/dev/null 2>&1 && [ -f tools/fetch_kernelcache_user.py ]; then
+  for spec in "${FETCH_DEVICES[@]}"; do
+    IFS=':' read -r m v b <<< "$spec"
+    dstdir="kernelcaches/${m}_${v}"
+    if [ ! -f "$dstdir/kernelcache" ]; then
+      echo "-> Auto-fetching kernelcache for ${m} ${v} (${b}) ..."
+      python3 tools/fetch_kernelcache_user.py --device "$m" --version "$v" --build "$b" \
+        --out "$dstdir/kernelcache" \
+        || echo "   (fetch failed — that device will fall back to network at runtime)"
+    fi
+  done
+fi
+
 EMBEDDED_COUNT=0
 for kc in kernelcaches/*/kernelcache; do
   [ -f "$kc" ] || continue
   MODEL_DIR=$(dirname "$kc")
-  MODEL_NAME=$(basename "$MODEL_DIR")
-  cp "$kc" "$APP_DIR/$SCHEME.app/kernelcache.lzfse"
-  echo "-> Embedded $kc as kernelcache.lzfse (offline install for $MODEL_NAME)"
+  NAME=$(basename "$MODEL_DIR")            # e.g. iPhone14,2_16.5.1
+  NAME=${NAME//,/_}                        # iPhone14_2_16.5.1
+  cp "$kc" "$APP_DIR/$SCHEME.app/kernelcache_${NAME}.lzfse"
+  echo "-> Embedded $kc as kernelcache_${NAME}.lzfse (offline for $NAME)"
   EMBEDDED_COUNT=$((EMBEDDED_COUNT + 1))
 done
 if [ "$EMBEDDED_COUNT" -gt 0 ]; then
-  echo "-> Total: $EMBEDDED_COUNT kernelcache(s) embedded"
+  echo "-> Total: $EMBEDDED_COUNT kernelcache(s) embedded (fully offline for those devices)"
 else
-  echo "-> No kernelcaches found in kernelcaches/ — will use network download at runtime"
-fi
-
-# (Legacy) raw embedded kernelcache support — kept for backward compat
-if [ -f Resources/kernelcache ]; then
-  cp Resources/kernelcache "$APP_DIR/$SCHEME.app/kernelcache"
-  echo "-> Embedded Resources/kernelcache (offline install enabled)"
+  echo "-> No kernelcaches found — installer will need network/mirror at runtime"
 fi
 
 pushd "$APP_DIR" >/dev/null

@@ -1,47 +1,49 @@
-# Kernelcache 文件目录
+# Kernelcache 文件目录（v12 — 多设备离线内嵌）
 
-> v11 更新：重新支持内嵌 kernelcache（可选），同时大幅改进网络下载逻辑。
+> v12 核心变化：**一个 IPA 可内嵌多台设备/版本的内核缓存**，安装时按 `设备型号 + iOS 版本`
+> 自动匹配，命中即 100% 离线安装，完全不需要 VPN / 镜像 / 网络。
+> TrollStore.tar 早已内置（见 README_novpn.md），无需再处理。
 
-## 下载策略（v11，按优先级）
+## 下载策略（v12，按优先级）
 
-安装器按以下顺序尝试获取 kernelcache：
+1. **内嵌 kernelcache（按设备+版本匹配）** → 100% 离线，首选
+2. MacDirtyCow 系统拷贝（iOS 15.0–15.7.1 / 16.0–16.1.2）
+3. 镜像服务器（多源 + 重试 + 多路径模板；含已失效的 `kcache.js.appstore.top`）
+4. Apple 官方源（`libgrabkernel2`，国内可能需 VPN）
+5. 全部失败 → 显示清晰操作指引
 
-1. **内嵌 LZFSE**（本目录有文件时自动启用）→ 100% 离线，无需网络
-2. **MacDirtyCow 系统拷贝**（iOS 15.0–15.7.1 / 16.0–16.1.2）
-3. **镜像服务器**（多源 + 重试 + 多路径模板）
-   - `kcache.js.appstore.top`（果粉助手原镜像，可能已失效）
-   - GitHub Releases（`releases/download/kernelcaches/`）
-4. **AppleDB → Apple CDN**（`libgrabkernel2`，可能需要 VPN）
-5. **全部失败** → 显示清晰的操作指引
+## 目录布局
 
-## 如何添加内嵌 kernelcache
+每个设备/版本单独一个子目录，目录名 = `<型号>_<iOS版本>`，里面放名为 `kernelcache` 的
+LZFSE 压缩文件（magic `bvx2`，无扩展名）：
 
-1. 获取对应设备+版本的 LZFSE 压缩 kernelcache
-2. 放入 `{model}/kernelcache`，例如：
-   ```
-   kernelcaches/
-   ├── iPhone8,1/kernelcache      ← iPhone 8 (任意 iOS 版本)
-   ├── iPhone14,2/kernelcache     ← iPhone 13 Pro Max
-   └── ...
-   ```
-3. 运行 `build.sh` 或 GitHub Actions 自动编译 → IPA 自动包含
+```
+kernelcaches/
+├── iPhone8,1_15.8.7/kernelcache     ← iPhone 6s, iOS 15.8.7 (build 19H384)
+├── iPhone14,2_16.5.1/kernelcache    ← iPhone 13 Pro Max, iOS 16.5.1 (build 20F75)
+└── ...（可继续添加任意设备/版本）
+```
 
-> ⚠️ **版本匹配要求**：内嵌 kernelcache 的 iOS build 号必须与用户设备的**完全一致**。
-> 不匹配会导致 `build_physrw` 内核 panic（黑屏重启）。详见下方「历史说明」。
+`build.sh` 会把这些文件拷进 App 包，命名为 `kernelcache_<型号U>_<版本>.lzfse`
+（型号里的逗号替换为下划线，例如 `kernelcache_iPhone14_2_16.5.1.lzfse`）。
+运行时 `getKernel()` 依据 `device.modelIdentifier` + `device.version` 自动选取，**多设备互不干扰**。
 
-## 镜像下载改进（v11）
+## 如何添加一台设备的离线 kernelcache
 
-- **超时时间**：120s → 180s
-- **重试机制**：每个 URL 最多重试 2 次（间隔 3 秒）
-- **路径模板**：每个镜像尝试 5 种路径格式
-- **文件验证**：拒绝过小文件和 HTML 错误页面
-- **HTTP 错误感知**：404/503 等不触发重试
-- **GitHub Releases 支持**：可上传 kernelcaches 到 Release assets
+最简单：在本机（能连 Apple CDN，无需 VPN）运行：
 
-## 历史说明（v6–v10 问题记录）
+```bash
+python3 tools/fetch_kernelcache_user.py --device iPhone8,1 --version 15.8.7 --build 19H384
+```
 
-| 版本 | 方案 | 问题 |
-|------|------|------|
-| v6–v9 | 内嵌单一 kernelcache | build 不匹配 → 内核 panic 黑屏 |
-| v10 | 纯网络下载 | kcache.js.appstore.top DNS 失效 → 全部超时 |
-| v11 | 内嵌(可选) + 多源网络 + 重试 | 兼顾离线可靠性和网络灵活性 |
+脚本会自动向 Apple 官方资产源 `gdmf.apple.com` 查询 IPSW 地址，并只下载其中的
+kernelcache 片段，存入 `kernelcaches/iPhone8,1_15.8.7/kernelcache`。
+
+- 不指定参数时默认抓取 **iPhone8,1 / 15.8.7 (19H384)**。
+- 也可用 `--url <直接 .ipsw 链接>` 跳过查询。
+- 若 Apple 资产源被墙，可手动用任意 TrollStore 安装器 / IPSW 提取 LZFSE kernelcache 放入对应目录。
+
+添加后提交并触发构建，该设备即可离线安装。
+
+> ⚠️ **版本必须完全匹配**：内嵌 kernelcache 的 iOS build 必须与设备**完全一致**，
+> 否则 `build_physrw` 会内核 panic（黑屏重启）。目录名里的版本号请写准确。

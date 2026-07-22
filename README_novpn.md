@@ -1,7 +1,8 @@
 # TrollInstallerX — 无需 VPN 版（fork）
 
 在官方 [alfiecg24/TrollInstallerX](https://github.com/alfiecg24/TrollInstallerX) 基础上改造，
-目标是：**无需 VPN 即可安装 TrollStore2，并支持 iOS 15.0–15.1 与 iOS 15.8.7–15.8.8 一键安装**。
+目标是：**无需 VPN 即可安装 TrollStore2（iOS 14.0–16.6.1 受支持）；通过内嵌各设备内核缓存，
+让 iOS 15 / 16 这类需要内核缓存的版本也能完全离线安装**。
 改造思路参考了「果粉助手」的做法（它本质就是 TrollInstallerX 的改版）。
 
 ---
@@ -12,7 +13,7 @@
 |----|----------|---------|
 | TrollStore.tar | 运行时从 `github.com/opa334/TrollStore` 下载 | **已内置**（最新版，含 15.8.7 / 15.8.8 的 CoreTrust 数据） |
 | 版本检查 `getUpdatedTrollStore` | 启动即访问 `api.github.com` | **已关闭**（`OFFLINE_MODE = true`，零 GitHub 依赖） |
-| kernelcache 来源 `getKernel` | 仅本地 / Apple 服务器（国内被墙→需 VPN） | **镜像优先 + 内嵌兜底**：可配置国内镜像 `KernelcacheSource.mirrorBaseURL`，优先用内嵌 `kernelcache`（完全离线） |
+| kernelcache 来源 `getKernel` | 仅本地 / Apple 服务器（国内被墙→需 VPN） | **多设备内嵌优先（100% 离线）+ 镜像/Apple 兜底**：每个设备/版本的内核缓存单独内嵌，运行时按型号+版本自动匹配；未命中再走镜像（可能失效）或 Apple 源 |
 | 版本范围 | 14.0 – 16.6.1 | 不变（见下文：15.0–15.1 / 15.8.7–15.8.8 上游本就支持） |
 
 > 关键结论：**官方代码早已支持 15.0–15.1 与 15.8.7–15.8.8**（漏洞 `landa` 覆盖 14.0–16.6.1，
@@ -34,11 +35,18 @@
 - ⚠️ 该镜像为国内 CDN，作者在 Windows 环境下无法联网验证路径是否正确；
   请你在设备上实测。若拿不到 kernelcache，把果粉助手日志里的真实 URL 发我，我据此修正模板。
 
-### 策略 B：构建期内嵌 kernelcache（100% 离线，零网络）
-- 用 `fetch_kernelcache.py` 获取对应机型的 kernelcache，放到 `Resources/kernelcache`（无扩展名）。
-- `build.sh` 会把它拷进 `.app`；运行时 `getKernel()` 优先用内嵌文件，**完全不碰网络**。
-- 适合只给自己/少数固定机型用。脚本为 best-effort（需 AppleDB + pyimg4 + lzfse 解压），
-  如解压失败可改从任意可用 TrollStore 安装器的 bundle 里取现成 kernelcache。
+### 策略 B：构建期内嵌「多设备」kernelcache（100% 离线，零网络）— 推荐
+- 每个设备/版本的内核缓存单独内嵌在 App 包里，运行时按 `型号 + iOS 版本` 自动匹配，
+  **一台 IPA 即可离线安装多台设备**，完全不碰网络 / 镜像 / VPN。
+- TrollStore.tar **早已内置**（从 v3 起就打进安装器），本方案只是把「缺的内核缓存」也补齐，
+  从而让 iOS 15 / 16 这类需要内核缓存的版本也能离线装。
+- 获取方式（本机联网 Apple CDN 即可，无需 VPN）：
+  ```bash
+  python3 tools/fetch_kernelcache_user.py --device iPhone8,1 --version 15.8.7 --build 19H384
+  ```
+  脚本会自动查 Apple 官方资产源并只抽取 kernelcache 片段，存入
+  `kernelcaches/iPhone8,1_15.8.7/kernelcache`。`build.sh` 随后把它拷进 App 包。
+- 想再加设备？再跑一次脚本换参数即可，目录互不干扰。
 
 ---
 
@@ -48,10 +56,17 @@
 > 以下两种方式二选一。
 
 ### 方式 1：GitHub Actions 云端编译（推荐，不需要自己的 Mac）
-1. 把这个仓库 fork 到你的 GitHub。
-2. （可选）若要走策略 B，先运行 `fetch_kernelcache.py` 生成 `Resources/kernelcache` 并提交。
-3. 在仓库 `Actions` 标签页手动运行 `Build TrollInstallerX (no-VPN)`。
-4. 运行结束后在 `Artifacts` 里下载 `TrollInstallerX-novpn`（即 `TrollInstallerX.ipa`）。
+1. 确保仓库里已有所需设备的 kernelcache（见策略 B；`kernelcaches/` 目录）。
+2. 在本机（能连 Apple CDN）一键完成「抓取 iPhone8,1 + 提交 + 推送」：
+   ```bash
+   fetch_and_push.bat        # Windows 双击运行；或手动执行里面的命令
+   ```
+   脚本会抓取 iPhone8,1/15.8.7 的 kernelcache，提交并推送到 GitHub，
+   **自动触发 Actions 编译**。
+3. 仓库 `Actions` 标签页等待 `Build TrollInstallerX (no-VPN)` 跑完，
+   在 `Artifacts` 里下载 `TrollInstallerX.ipa`（已内嵌所有 kernelcache，离线可用）。
+4. 想加更多设备：先 `python3 tools/fetch_kernelcache_user.py --device ... --version ... --build ...`，
+   再 `git add -A && git commit -m "add xxx" && git push` 触发重新编译。
 
 ### 方式 2：本地 Mac 编译
 ```bash

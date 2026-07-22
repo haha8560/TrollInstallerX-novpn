@@ -99,21 +99,41 @@ func prepareKernelcache(_ path: String) -> Bool {
     return true
 }
 
+/// Returns the path of a bundled kernelcache that matches this device + iOS version,
+/// or nil if none is embedded. Supports MANY device/version combos for fully-offline
+/// installation (e.g. iPhone8,1/15.8.7 and iPhone14,2/16.5.1 baked in at build time).
+///
+/// Bundled file naming (produced by build.sh):
+///   kernelcache_<ModelU>_<Version>.lzfse   e.g. kernelcache_iPhone14_2_16.5.1.lzfse
+///   kernelcache_<ModelU>.lzfse             (loose match — any version for that model)
+///   kernelcache.lzfse                      (legacy single-file fallback)
+/// where <ModelU> is the model identifier with "," replaced by "_".
+func embeddedKernelcachePath(_ device: Device) -> String? {
+    let modelU = device.modelIdentifier.replacingOccurrences(of: ",", with: "_")
+    let ver = device.version.readableString
+    let candidates = [
+        "kernelcache_\(modelU)_\(ver)",
+        "kernelcache_\(modelU)",
+        "kernelcache",
+    ]
+    for name in candidates {
+        if let p = Bundle.main.path(forResource: name, ofType: "lzfse") { return p }
+        if let p = Bundle.main.path(forResource: name, ofType: "") { return p }
+    }
+    return nil
+}
+
 func getKernel(_ device: Device) -> Bool {
     if !fileManager.fileExists(atPath: kernelPath) {
-        // ── Source 0: Embedded kernelcache (100% offline, highest priority) ──
-        // If a kernelcache.lzfse or kernelcache is bundled with the app, use it.
-        // This enables fully-offline installation for pre-built device/version combos.
-        var embeddedFound = false
-        if let embedded = Bundle.main.path(forResource: "kernelcache", ofType: "lzfse") {
+        // ── Source 0: Embedded per-device kernelcache (100% offline, top priority) ──
+        // build.sh embeds kernelcaches/<Model>_<Version>/kernelcache as
+        //   kernelcache_<ModelU>_<Version>.lzfse  inside the app bundle.
+        // This makes installation work with NO network / NO VPN for every bundled combo.
+        if let embedded = embeddedKernelcachePath(device) {
             try? fileManager.copyItem(atPath: embedded, toPath: kernelPath)
-            embeddedFound = fileManager.fileExists(atPath: kernelPath)
-            if embeddedFound { Logger.log("使用内嵌 LZFSE 内核缓存（离线模式）", type: .success) }
-        }
-        if !embeddedFound, let embedded = Bundle.main.path(forResource: "kernelcache", ofType: "") {
-            try? fileManager.copyItem(atPath: embedded, toPath: kernelPath)
-            embeddedFound = fileManager.fileExists(atPath: kernelPath)
-            if embeddedFound { Logger.log("使用内嵌内核缓存（离线模式）", type: .success) }
+            if fileManager.fileExists(atPath: kernelPath) {
+                Logger.log("使用内嵌内核缓存（离线模式）：\((embedded as NSString).lastPathComponent)", type: .success)
+            }
         }
 
         // ── Source 1: MacDirtyCow unsandboxed system copy (iOS 15.0-15.7.1/16.0-16.1.2) ──
