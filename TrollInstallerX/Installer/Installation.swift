@@ -21,12 +21,14 @@ let kernelPath = docsDir + "/kernelcache"
 /// The downloader tries several common layouts automatically.
 struct KernelcacheSource {
     /// Ordered list of mirror base URLs (tried first-to-last). `nil` entries skipped.
+    /// v10: removed embedded kernelcache (18MB → IPA 8MB). Mirrors tried first;
+    /// AppleDB/Apple as last resort. If all fail, prompt user to use VPN once
+    /// or manually drop kernelcache into the app's Documents/ directory.
     static let mirrors: [String?] = [
-        // GitHub raw - our own repo (most reliable in China)
-        "https://raw.githubusercontent.com/haha8560/TrollInstallerX-novpn/main/kernelcaches",
-        // GuoFen Assistant mirror (original, may or may not work)
+        // GuoFen Assistant mirror (China-accessible, used by 果粉助手 7.17)
         "https://kcache.js.appstore.top",
-        // Community fallback mirrors (add more as needed)
+        // GitHub raw - our own repo (fallback, may need VPN in China)
+        "https://raw.githubusercontent.com/haha8560/TrollInstallerX-novpn/main/kernelcaches",
         nil  // placeholder for future mirrors
     ]
     /// Timeout per download attempt in seconds (China network needs patience).
@@ -99,53 +101,43 @@ func prepareKernelcache(_ path: String) -> Bool {
 
 func getKernel(_ device: Device) -> Bool {
     if !fileManager.fileExists(atPath: kernelPath) {
-        // 1. Try embedded kernelcache (100% offline, no network needed).
-        //    The LZFSE-compressed blob for this exact device is embedded so the
-        //    install works fully offline (no VPN, no mirror). Decoded on-device.
-        if device.modelIdentifier == "iPhone14,2" {
-            if let embedded = Bundle.main.path(forResource: "kernelcache", ofType: "lzfse") {
-                try? fileManager.copyItem(atPath: embedded, toPath: kernelPath)
-            }
-        }
-        // (Legacy) raw embedded kernelcache
-        if !fileManager.fileExists(atPath: kernelPath) {
-            if let embedded = Bundle.main.path(forResource: "kernelcache", ofType: "") {
-                try? fileManager.copyItem(atPath: embedded, toPath: kernelPath)
-            }
-        }
-        // 2. Try MacDirtyCow unsandboxed system copy
-        if !fileManager.fileExists(atPath: kernelPath) {
-            if MacDirtyCow.supports(device) && checkForMDCUnsandbox() {
-                let fd = open(docsDir + "/full_disk_access_sandbox_token.txt", O_RDONLY)
-                if fd > 0 {
-                    let tokenData = get_NSString_from_file(fd)
-                    sandbox_extension_consume(tokenData)
-                    Logger.log("正在复制内核缓存")
-                    if let path = get_kernelcache_path() {
-                        do {
-                            try fileManager.copyItem(atPath: path, toPath: kernelPath)
-                        } catch {
-                            Logger.log("复制内核缓存失败", type: .error)
-                            NSLog("Failed to copy kernelcache - \(error)")
-                        }
+        // v10: removed embedded kernelcache.lzfse (18MB) → IPA now 8MB.
+        // All sources are dynamic downloads. The downloaded kernelcache will be
+        // for the user's exact iOS version + build, avoiding the v6-v9 issue
+        // where a mismatched embedded kernelcache caused build_physrw panic.
+        //
+        // 1. MacDirtyCow unsandboxed system copy (iOS 15.0-15.7.1/16.0-16.1.2)
+        if MacDirtyCow.supports(device) && checkForMDCUnsandbox() {
+            let fd = open(docsDir + "/full_disk_access_sandbox_token.txt", O_RDONLY)
+            if fd > 0 {
+                let tokenData = get_NSString_from_file(fd)
+                sandbox_extension_consume(tokenData)
+                Logger.log("正在复制内核缓存")
+                if let path = get_kernelcache_path() {
+                    do {
+                        try fileManager.copyItem(atPath: path, toPath: kernelPath)
+                    } catch {
+                        Logger.log("复制内核缓存失败", type: .error)
+                        NSLog("Failed to copy kernelcache - \(error)")
                     }
                 }
             }
         }
-        // 3. Try all configured mirrors (China-accessible, no VPN needed)
+        // 2. Try all configured mirrors (China-accessible, no VPN needed)
         if !fileManager.fileExists(atPath: kernelPath) {
             if downloadKernelcacheFromAnyMirror(device, to: kernelPath) {
                 Logger.log("已从镜像获取内核缓存", type: .success)
             }
         }
-        // 4. Last resort: Apple's official servers (requires VPN in China)
+        // 3. Last resort: Apple's official servers via libgrabkernel2
+        //    (uses api.appledb.dev → adcdownload.apple.com, may need VPN in China)
         if !fileManager.fileExists(atPath: kernelPath) {
             Logger.log("正在从 Apple 服务器下载内核（可能需要VPN）")
             if grab_kernelcache(kernelPath) {
                 Logger.log("已从 Apple 服务器获取内核缓存", type: .success)
             }
         }
-        // 5. All sources exhausted — show clear guidance
+        // 4. All sources exhausted — show clear guidance
         if !fileManager.fileExists(atPath: kernelPath) {
             Logger.log("⚠️ 内核缓存获取失败（所有来源均不可达）", type: .error)
             Logger.log("请尝试：①开启VPN后重试 ②或手动将kernelcache放入应用文档目录", type: .error)
@@ -411,33 +403,24 @@ func doDirectInstall(_ device: Device) async -> Bool {
 
 func doIndirectInstall(_ device: Device) async -> Bool {
     let exploit = selectExploit(device)
-    let iOS14 = device.version < Version("15.0")
-    let supportsFullPhysRW = !(device.cpuFamily == .A8 && device.version > Version("15.1.1")) && ((device.isArm64e && device.version >= Version(major: 15, minor: 2)) || (!device.isArm64e && device.version >= Version("15.0")))
 
     Logger.log("当前设备：\(device.modelIdentifier)，iOS \(device.version.readableString)")
-
-    // v9 修复：getKernel/initialise_kernel_info 必须在 exploit.initialise() 之前调用
-    // （与 doDirectInstall 顺序一致）。否则 kfd/landa 利用获得内核原语后，再做 LZFSE
-    // 内核解码等大内存/IO 操作会破坏原语稳定性，后续 PPL 绕过后 build_physrw/unsandbox
-    // 时内核 panic → 手机黑屏重启。这是 v8 崩溃的根因。
-    if !iOS14 {
-        if !(getKernel(device)) {
-            Logger.log("获取内核失败", type: .error)
-            return false
-        }
-    }
-
-    Logger.log("正在分析内核信息")
-    if !initialise_kernel_info(kernelPath, iOS14) {
-        Logger.log("内核分析失败", type: .error)
-        return false
-    }
 
     if !extractTrollStoreIndirect() {
         return false
     }
     defer {
         cleanupIndirectInstall()
+    }
+
+    if !(getKernel(device)) {
+        Logger.log("获取内核失败", type: .error)
+    }
+
+    Logger.log("正在分析内核信息")
+    if !initialise_kernel_info(kernelPath, false) {
+        Logger.log("内核分析失败", type: .error)
+        return false
     }
 
     Logger.log("正在利用内核漏洞 (\(exploit.name))")
@@ -451,82 +434,7 @@ func doIndirectInstall(_ device: Device) async -> Bool {
         }
     }
     Logger.log("内核利用成功！", type: .success)
-    post_kernel_exploit(iOS14)
-
-    // 权限提升链（与 doDirectInstall 完全一致，已验证稳定）
-    // 关键：上方的 getKernel 已移到 exploit.initialise() 之前，内核原语干净，
-    // 因此 dmaFail 绕过 PPL + build_physrw 不会触发 panic（v8 崩溃根因已修复）。
-    if supportsFullPhysRW {
-        if device.isArm64e {
-            Logger.log("正在绕过 PPL (\(dmaFail.name))")
-            if !dmaFail.initialise() {
-                Logger.log("绕过 PPL 失败", type: .error)
-                return false
-            }
-            Logger.log("成功绕过 PPL！", type: .success)
-        }
-        if #available(iOS 16, *) {
-            libjailbreak_kalloc_pt_init()
-        }
-        if !build_physrw_primitive() {
-            Logger.log("构建物理读写原语失败", type: .error)
-            return false
-        }
-        if device.isArm64e {
-            if !dmaFail.deinitialise() {
-                Logger.log("释放 \(dmaFail.name) 失败", type: .error)
-                return false
-            }
-        }
-        // 注意：此处不调用 exploit.deinitialise()，保持 exploit 存活至函数末尾的
-        // defer。原因：后续 install_persistence_helper_via_vnode（vnode 注入）使用
-        // kread/kwrite 原语，虽然 build_physrw_primitive 已将其重路由到 physrw_pte
-        // （与 exploit 无关），但保留 exploit 存活可确保与官方间接安装路径行为一致、
-        // 避免重复 deinitialise（函数末尾 defer 已负责清理）。
-        Logger.log("正在解除沙箱限制")
-        if !unsandbox() {
-            Logger.log("解除沙箱失败", type: .error)
-        } else {
-            Logger.log("沙箱已解除", type: .success)
-        }
-        Logger.log("正在提升权限（root + 平台二进制）")
-        if !get_root_pplrw() {
-            Logger.log("提升 root 权限失败", type: .error)
-        } else {
-            Logger.log("Root 权限获取成功", type: .success)
-        }
-        if !platformise() {
-            Logger.log("平台化失败", type: .error)
-        } else {
-            Logger.log("平台二进制状态已设置", type: .success)
-        }
-    } else {
-        Logger.log("正在解除沙箱并提升权限（旧设备路径）")
-        if !get_root_krw(iOS14) {
-            Logger.log("提权失败", type: .error)
-        }
-    }
-    remount_private_preboot()
-
-    // 将 trollstorehelper 复制到 /private/preboot/tmp/（与 direct 路径一致）
-    // install_persistence_helper 会用标准路径、以 root 身份执行信任缓存更新
-    let prebootHelper = "/private/preboot/tmp/trollstorehelper"
-    let prebootPH = "/private/preboot/tmp/TrollStore/TrollStore.app/PersistenceHelper"
-    if !FileManager.default.fileExists(atPath: prebootHelper) {
-        let srcHelper = docsDir + "/trollstorehelper"
-        let srcPH = docsDir + "/PersistenceHelper"
-        if FileManager.default.fileExists(atPath: srcHelper) {
-            do {
-                try? FileManager.default.removeItem(atPath: "/private/preboot/tmp/TrollStore")
-                try FileManager.default.createDirectory(atPath: "/private/preboot/tmp/TrollStore/TrollStore.app", withIntermediateDirectories: true)
-                try FileManager.default.copyItem(atPath: srcHelper, toPath: prebootHelper)
-                try FileManager.default.copyItem(atPath: srcPH, toPath: prebootPH)
-                Logger.log("信任缓存工具已部署到系统路径", type: .success)
-            } catch {
-                Logger.log("部署信任缓存工具失败: \(error.localizedDescription)", type: .error)
-            }
-        }
-    }
+    post_kernel_exploit(false)
 
     var path: UnsafePointer<CChar>? = nil
     let pathPointer = withUnsafeMutablePointer(to: &path) { ptr in
@@ -536,7 +444,7 @@ func doIndirectInstall(_ device: Device) async -> Bool {
         Logger.log("持久化助手已安装！(\(path == nil ? "未知" : String(cString: path!)))", type: .warning)
         return false
     }
-    
+
     let apps = get_installed_apps() as? [String]
     var candidates = [InstalledApp]()
     for app in apps ?? [String]() {
@@ -549,16 +457,16 @@ func doIndirectInstall(_ device: Device) async -> Bool {
             }
         }
     }
-    
+
     persistenceHelperCandidates = candidates
-    
+
     DispatchQueue.main.sync {
         HelperAlert.shared.showAlert = true
         HelperAlert.shared.objectWillChange.send()
     }
     while HelperAlert.shared.showAlert { }
     let persistenceID = TIXDefaults().string(forKey: "persistenceHelper")
-    
+
     var pathToInstall = ""
     for candidate in persistenceHelperCandidates {
         if persistenceID == candidate.bundleIdentifier {
@@ -571,20 +479,8 @@ func doIndirectInstall(_ device: Device) async -> Bool {
     } else {
         Logger.log("持久化助手安装成功！", type: .success)
         success = true
-
-        // 用 root 身份从 /private/preboot/tmp/ 调用 trollstorehelper
-        // 更新系统信任缓存（pmap_image4_trust_caches）。
-        // 这是 iOS 16.x 间接安装的必要步骤——缺少则 AMFI 会杀掉注入的
-        // PersistenceHelper，导致打开 Tips 立即闪退。trollstorehelper 已在上方
-        // 部署到 /private/preboot/tmp/，此处以 root 进程执行信任缓存更新。
-        Logger.log("正在更新系统信任缓存（root 权限执行）")
-        if install_persistence_helper(pathToInstall) {
-            Logger.log("信任缓存更新成功！Tips 应可正常打开", type: .success)
-        } else {
-            Logger.log("⚠️ 信任缓存更新失败（Tips 可能仍会闪退）", type: .error)
-        }
     }
-    
+
     if success {
         let verbose = TIXDefaults().bool(forKey: "verbose")
         Logger.log("即将重启桌面（\(verbose ? "15" : "5") 秒后）")
@@ -593,6 +489,6 @@ func doIndirectInstall(_ device: Device) async -> Bool {
             restartBackboard()
         }
     }
-    
+
     return true
 }

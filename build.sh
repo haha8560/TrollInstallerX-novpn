@@ -29,18 +29,21 @@ xcodebuild -configuration "$CONFIG" \
 APP_DIR="DerivedData/$SCHEME/Build/Products/$CONFIG-iphoneos"
 cp Resources/ents.plist "$APP_DIR/"
 
-# Embed a pre-extracted LZFSE-compressed kernelcache for a 100% offline,
-# no-VPN install. It lives at kernelcaches/<model>/kernelcache and is embedded
-# as kernelcache.lzfse; the app decodes it on-device via compression_decode_buffer.
-# If absent, the app falls back to the configured mirror and finally Apple.
-if [ -f kernelcaches/iPhone14,2/kernelcache ]; then
-  cp kernelcaches/iPhone14,2/kernelcache "$APP_DIR/$SCHEME.app/kernelcache.lzfse"
-  echo "-> Embedded kernelcaches/iPhone14,2/kernelcache as kernelcache.lzfse (offline install enabled)"
-else
-  echo "-> No kernelcaches/iPhone14,2/kernelcache found; will use mirror/Apple at runtime"
-fi
+# v10: removed embedded kernelcache.lzfse (18MB) — was causing build_physrw
+# kernel panic when the embedded build did not match the user's exact iOS build
+# (e.g. 20F75 embedded but user's device on 20F66). Now uses dynamic download
+# from kcache.js.appstore.top (no VPN) → AppleDB → Apple (VPN). IPA drops
+# from 26MB to 8MB, matching 果粉助手 size.
+#
+# To temporarily re-enable offline embedding for a SPECIFIC build you trust,
+# uncomment the block below and drop the LZFSE file at kernelcaches/<model>/kernelcache:
+#
+# if [ -f kernelcaches/iPhone14,2/kernelcache ]; then
+#   cp kernelcaches/iPhone14,2/kernelcache "$APP_DIR/$SCHEME.app/kernelcache.lzfse"
+#   echo "-> Embedded kernelcaches/iPhone14,2/kernelcache as kernelcache.lzfse (offline install enabled)"
+# fi
 
-# (Legacy) raw embedded kernelcache support
+# (Legacy) raw embedded kernelcache support — kept for backward compat
 if [ -f Resources/kernelcache ]; then
   cp Resources/kernelcache "$APP_DIR/$SCHEME.app/kernelcache"
   echo "-> Embedded Resources/kernelcache (offline install enabled)"

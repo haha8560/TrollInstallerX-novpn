@@ -1,47 +1,30 @@
 # Kernelcache 文件目录
 
-此目录存放预提取的 kernelcache，用于「无需 VPN」安装 TrollStore2。
+> v10 更新：移除内嵌 kernelcache（IPA 从 26MB 降到 8MB，与果粉助手一致）。
+> 改为**运行时动态下载**（首选国内镜像 `kcache.js.appstore.top`），首次需联网，
+> 之后保存在应用沙盒 `Documents/kernelcache` 中完全离线。
+> 这同时修复了 v6–v9 因内嵌 build 与用户实际 iOS build 不匹配而引发的
+> `build_physrw` 内核 panic（黑屏重启）。
 
-## 文件格式说明（重要）
+## 历史说明（v6–v9，仅供参考）
 
-本目录中的 `kernelcache` 文件是 **LZFSE 压缩**格式（Apple 原生内核缓存压缩），
-不是解压后的原始 Mach-O。其文件结构为：
+v6–v9 曾在此目录内置 iPhone14,2 / 16.5.1 / 20F75 的 LZFSE 压缩 kernelcache，
+但遇到跨 build（甚至同 iOS 版本的微小 build 差异）时，`build_physrw_primitive()`
+在 PPL 绕过后会因 PTE 物理地址假设失效而触发内核 panic。
 
-```
-bvx2 (4 字节魔数) + LZFSE 头 + LZFSE 压缩数据 + bvx$ (结束魔数)
-```
+修复后 v10 改为：
 
-安装器在 iOS 设备上使用系统 `compression_decode_buffer(COMPRESSION_LZFSE)`
-**本机解码**，无需 VPN、无需额外工具。解码后校验 Mach-O 魔数，确保有效。
+1. **首选镜像**：`https://kcache.js.appstore.top`（果粉助手同款，国内可直连，
+   多路径模板自动尝试）
+2. **GitHub raw 回退**：`https://raw.githubusercontent.com/haha8560/TrollInstallerX-novpn/main/kernelcaches`
+3. **AppleDB / Apple 最后回退**（可能需要 VPN）：通过预编译的 `libgrabkernel2`
+4. **手动放置**：将原始 kernelcache 复制到应用沙盒 `Documents/kernelcache`
+   （不需 LZFSE，安装器会自动识别）
 
-> 之所以存 LZFSE 而非原始文件：原始 kernelcache 约 100–1000 MB，而 LZFSE
-> 仅约 17 MB，便于提交到 Git / GitHub raw 镜像，下载更快、更省流量。
+镜像下载失败时会清晰提示用户开启 VPN 一次或手动放置。
 
-## 文件命名规则
+## 如何临时重新启用内嵌（高级用户）
 
-```
-{model}/kernelcache          例如: iPhone14,2/kernelcache
-{model_underscore}/kernelcache  例如: iPhone14_2/kernelcache
-```
-
-安装器会依次尝试 `{model}` 和 `{model_}` 两种路径（以及根目录），均失败再回退。
-
-## 如何获取 kernelcache（LZFSE 格式）
-
-从 Apple 官方 IPSW 提取（`extract_kernelcache_v2.py` + `carve.py`）：
-
-1. `extract_kernelcache_v2.py` 通过 HTTP Range 从 IPSW 下载 DEFLATE 压缩的
-   kernelcache 条目（ZIP64 解析）；
-2. `carve.py` 对 DEFLATE 输出做 zlib 解压，取出其中 IM4P payload 里的
-   `bvx2…bvx$` LZFSE 缓冲，保存为本目录的 `kernelcache`。
-
-以上两步已在本地（Windows）完成 iPhone14,2 / 16.5.1 / 20F75 的提取。
-
-## 支持的设备 + 版本组合
-
-| 设备型号 | iOS 版本 | Build | 状态 |
-|---------|---------|-------|------|
-| iPhone14,2 | 16.5.1 | 20F75 | ✅ 已内置（LZFSE，安装器本机解码，完全离线） |
-
-> 如需支持其它设备，请按上述方法提取对应 LZFSE 文件并提交到对应子目录，
-> 安装器会自动尝试下载并解码。
+如果网络完全不可用且你需要为特定 build 离线安装，可把对应 LZFSE 文件放回
+`{model}/kernelcache`（如 `iPhone14,2/kernelcache`），并在 `build.sh` 中
+重新打开内嵌段（已注释保留）。
