@@ -117,7 +117,15 @@ func cleanupIndirectInstall() {
     let rootHelper = docs.appendingPathComponent("trollstorehelper")
     let persistenceHelper = docs.appendingPathComponent("PersistenceHelper")
     let dotFile = docs.appendingPathComponent(".TrollStorePersistenceHelper")
-    try? fm.removeItem(at: extract)
+    
+    // IMPORTANT: Do NOT delete the extracted TrollStore directory!
+    // PersistenceHelper (running inside the injected app after respring) needs
+    // Documents/TrollStore/TrollStore.app/ to install TrollStore components
+    // (binary, ldid, icons, plists) into the host app bundle.
+    // Deleting this before respring causes Tips.app to crash on launch.
+    // Only clean up temp helper copies (already copied into app bundle by vnode).
+    // try? fm.removeItem(at: extract)  // ← PRESERVED for PersistenceHelper
+    
     try? fm.removeItem(at: rootHelper)
     try? fm.removeItem(at: persistenceHelper)
     try? fm.removeItem(at: dotFile)
