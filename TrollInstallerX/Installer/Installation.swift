@@ -23,7 +23,10 @@ let kernelPath = docsDir + "/kernelcache"
 struct KernelcacheSource {
     /// Ordered list of mirror base URLs (tried first-to-last). `nil` entries skipped.
     static let mirrors: [String?] = [
-        // GuoFen Assistant mirror (may be unreliable — DNS often fails)
+        // GuoFen Assistant's REAL mirror (recovered from its binary). This is the exact
+        // source 果粉助手 uses for its one-click install on 15.8.7-15.8.8 — try it first.
+        "https://kcache.js.appstore_k8x2mP9umo2.top",
+        // Legacy/obfuscated alias (often DNS-dead — kept as a low-priority fallback)
         "https://kcache.js.appstore.top",
         // GitHub Releases - our hosted kernelcaches (upload kernelcaches as release assets)
         "https://github.com/haha8560/TrollInstallerX-novpn/releases/download/kernelcaches",
@@ -136,6 +139,30 @@ func getKernel(_ device: Device) -> Bool {
             }
         }
 
+        // ── Source 0.5: User-provided kernelcache in THIS app's Documents (offline) ──
+        // Lets a user drop the kernelcache into our app's Documents (e.g. via Filza after
+        // copying it from anywhere, or via the iOS Files app) and install fully offline
+        // WITHOUT rebuilding the IPA. Matches the same model/version naming as the bundle.
+        if !fileManager.fileExists(atPath: kernelPath) {
+            let modelU = device.modelIdentifier.replacingOccurrences(of: ",", with: "_")
+            let ver = device.version.readableString
+            let docsCandidates = [
+                "\(docsDir)/kernelcache_\(modelU)_\(ver).lzfse",
+                "\(docsDir)/kernelcache_\(modelU).lzfse",
+                "\(docsDir)/kernelcache.lzfse",
+                "\(docsDir)/kernelcache",
+            ]
+            for c in docsCandidates {
+                if fileManager.fileExists(atPath: c) {
+                    try? fileManager.copyItem(atPath: c, toPath: kernelPath)
+                    if fileManager.fileExists(atPath: kernelPath) {
+                        Logger.log("使用 App 文档内的内核缓存（离线）：\((c as NSString).lastPathComponent)", type: .success)
+                    }
+                    break
+                }
+            }
+        }
+
         // ── Source 1: MacDirtyCow unsandboxed system copy (iOS 15.0-15.7.1/16.0-16.1.2) ──
         if !fileManager.fileExists(atPath: kernelPath) {
             if MacDirtyCow.supports(device) && checkForMDCUnsandbox() {
@@ -170,11 +197,15 @@ func getKernel(_ device: Device) -> Bool {
         }
         // ── All sources exhausted — show clear guidance ──
         if !fileManager.fileExists(atPath: kernelPath) {
+            let modelU = device.modelIdentifier.replacingOccurrences(of: ",", with: "_")
+            let ver = device.version.readableString
             Logger.log("⚠️ 内核缓存获取失败（所有来源均不可达）", type: .error)
-            Logger.log("请尝试以下方法：", type: .error)
-            Logger.log("  ① 开启 VPN 后重新点击安装", type: .error)
-            Logger.log("  ② 或用其他工具下载 kernelcache 放入应用文档目录", type: .error)
-            Logger.log("  ③ 或使用已内置内核缓存的安装器版本", type: .error)
+            Logger.log("本机 \(modelU) / \(ver) 需要一份匹配的内核缓存才能安装。", type: .error)
+            Logger.log("可行方案（任选其一，之后即可完全离线安装）：", type: .error)
+            Logger.log("  ① 把 kernelcache 文件命名为 kernelcache_\(modelU)_\(ver).lzfse", type: .error)
+            Logger.log("     用 Filza/Files 放进本 App 的“文档”目录，再点安装", type: .error)
+            Logger.log("  ② 构建时把 kernelcache 放到 kernelcaches/\(modelU)_\(ver)/kernelcache 内嵌", type: .error)
+            Logger.log("  ③ 临时开 VPN 点一次安装（内核缓存会缓存进本 App 文档，之后离线可用）", type: .error)
             return false
         }
     }

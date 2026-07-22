@@ -2,24 +2,32 @@
 """
 Fetch & extract a device-specific LZFSE kernelcache for OFFLINE TrollStore install.
 
-How it works (no hard-coded URLs needed):
-  1. Query Apple's public asset feed  https://gdmf.apple.com/v2/assets
-  2. Locate the restore IPSW for the given device + build
-  3. Download ONLY the kernelcache entry from the IPSW (HTTP Range requests)
-  4. Save it as an LZFSE file (magic `bvx2`) ready for TrollInstallerX's getKernel()
+How it works (no hard-coded IPSW URLs needed):
+  1. Resolve the firmware for the given build via AppleDB (https://api.appledb.dev/ios/<build>.json)
+     -> it returns both a "restore" (.ipsw) URL and an "ota" URL.
+  2a. If a restore IPSW exists (e.g. 16.5.1): download ONLY the kernelcache entry via HTTP
+      Range requests, extract the LZFSE payload from the IMG4/im4p container, save it.
+  2b. If only an OTA exists (e.g. 15.8.7 / 15.8.8 are OTA-only security updates): download the
+      OTA, unzip, locate the kernelcache entry, extract the LZFSE payload. (If the kernelcache
+      is nested inside the OTA payload DMG, the script will tell you and fall back to the
+      one-time-VPN-cache method described in the README.)
 
-This only needs access to Apple's servers (updates.cdn-apple.com / gdmf.apple.com) —
-which works fine in China WITHOUT a VPN. Run it on your Mac/Windows before building,
-or let GitHub Actions run it at build time (Actions runners have internet).
+The output is a ready-to-embed LZFSE file (magic `bvx2`) that TrollInstallerX's getKernel()
+consumes directly — no further conversion needed.
+
+Network: needs access to Apple's servers / AppleDB. Works fine from most networks in China
+without a VPN. Run it on your Mac/PC before building, or let GitHub Actions run it at build
+time (Actions runners have internet).
 
 Usage:
-  python3 fetch_kernelcache_user.py                            # default: iPhone8,1 15.8.7 (19H384)
+  python3 fetch_kernelcache_user.py --device iPhone8,1 --version 15.8.7 --build 19H384
   python3 fetch_kernelcache_user.py --device iPhone14,2 --version 16.5.1 --build 20F75
-  python3 fetch_kernelcache_user.py --url <direct .ipsw link>  # skip feed lookup
+  python3 fetch_kernelcache_user.py --url <direct .ipsw or .ota link>  # skip firmware lookup
 """
-import urllib.request, struct, os, sys, json, argparse
+import urllib.request, struct, os, sys, json, argparse, io, zipfile
 
 GDMF = "https://gdmf.apple.com/v2/assets"
+APPLEDB_IOS = "https://api.appledb.dev/ios/{build}.json"
 
 
 def log(m):
@@ -40,31 +48,88 @@ def range_req(url, start, end=None, timeout=180):
         return None
 
 
-def resolve_ipsw_url(device, build):
-    log("Querying Apple asset feed for {} {} ...".format(device, build))
+def get_url(url, timeout=180):
+    req = urllib.request.Request(url, headers={"User-Agent": "TrollInstallerX-novpn/4.0"})
     try:
-        req = urllib.request.Request(GDMF, headers={"User-Agent": "TrollInstallerX-novpn/4.0"})
-        with urllib.request.urlopen(req, timeout=60) as r:
-            data = json.loads(r.read().decode("utf-8"))
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
     except Exception as e:
-        log("Failed to fetch asset feed: {}".format(e))
+        log("GET error: {}".format(e))
         return None
-    for asset in data.get("Assets", []):
-        if asset.get("Build") != build:
-            continue
-        if device not in asset.get("SupportedDevices", []):
-            continue
-        restore = asset.get("Restore") or {}
-        url = restore.get("URL")
-        if url and url.endswith(".ipsw"):
-            log("Found IPSW: {}".format(url))
-            return url
-    log("No matching IPSW found for {} {}".format(device, build))
+
+
+# ---------------------------------------------------------------------------
+# IMG4 / im4p -> LZFSE payload extraction (DER-accurate)
+# ---------------------------------------------------------------------------
+def extract_lzfse_from_im4p(data: bytes) -> bytes | None:
+    """Return the LZFSE (bvx2) kernelcache payload from an IMG4 file, else None."""
+    if data[:4] == b"bvx2":
+        return data  # already LZFSE
+    if data[:4] != b"IM4P":
+        return None
+    i = 4
+    # skip name (null-terminated C string)
+    while i < len(data) and data[i] != 0:
+        i += 1
+    i += 1
+    if i + 8 > len(data):
+        return None
+    # payload type (4) + length (4)
+    plen = struct.unpack_from(">I", data, i + 4)[0]
+    pstart = i + 8
+    payload = data[pstart:pstart + plen]
+    if payload[:4] == b"bvx2":
+        return payload
+    # Some im4p wrap a nested IMG4 (krnl) — try to find the first LZFSE blob.
+    idx = payload.find(b"bvx2")
+    if idx >= 0:
+        # parse DER OCTET STRING length at idx-4
+        length = struct.unpack_from(">I", payload, idx - 4)[0]
+        return payload[idx:idx + length]
     return None
 
 
+def save_lzfse(data: bytes, out_path: str) -> bool:
+    if data[:4] != b"bvx2":
+        log("Extracted payload is not LZFSE (magic=%r) — not usable" % data[:4])
+        return False
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    with open(out_path, "wb") as f:
+        f.write(data)
+    log("Saved LZFSE kernelcache -> {} ({:,} bytes = {:.1f} MB)".format(
+        out_path, len(data), len(data) / 1024 / 1024))
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Firmware resolution
+# ---------------------------------------------------------------------------
+def resolve_firmware(build):
+    """Return (restore_url, ota_url) for the build via AppleDB."""
+    log("Querying AppleDB for build {} ...".format(build))
+    try:
+        raw = get_url(APPLEDB_IOS.format(build=build), timeout=60)
+        if not raw:
+            return None, None
+        j = json.loads(raw.decode("utf-8"))
+    except Exception as e:
+        log("AppleDB lookup failed: {}".format(e))
+        return None, None
+    restore = (j.get("restore") or {}).get("url")
+    ota = (j.get("ota") or {}).get("url")
+    if restore:
+        log("restore IPSW: {}".format(restore))
+    if ota:
+        log("ota: {}".format(ota))
+    if not restore and not ota:
+        log("No restore/ota URL in AppleDB response for {}".format(build))
+    return restore, ota
+
+
+# ---------------------------------------------------------------------------
+# IPSW path (restore build)
+# ---------------------------------------------------------------------------
 def find_kernelcache_in_ipsw(ipsw_url, out_path):
-    # Grab the tail of the IPSW to locate the ZIP64 EOCD record (no need to know total size).
     tail = range_req(ipsw_url, -200000)
     if not tail or len(tail) < 100:
         log("Failed to read IPSW tail")
@@ -80,7 +145,6 @@ def find_kernelcache_in_ipsw(ipsw_url, out_path):
         return 1
     cd_size = struct.unpack_from("<Q", eocd64_data, 40)[0]
     cd_offset = struct.unpack_from("<Q", eocd64_data, 48)[0]
-    log("Central dir @ 0x{:x} size 0x{:x}".format(cd_offset, cd_size))
     cd_data = range_req(ipsw_url, cd_offset, cd_offset + cd_size)
     if not cd_data:
         log("Failed to read central directory")
@@ -91,7 +155,6 @@ def find_kernelcache_in_ipsw(ipsw_url, out_path):
     while pos + 46 <= len(cd_data):
         if cd_data[pos:pos + 4] != b"PK\x01\x02":
             break
-        comp_method = struct.unpack_from("<H", cd_data, pos + 10)[0]
         comp_size = struct.unpack_from("<I", cd_data, pos + 20)[0]
         uncomp_size = struct.unpack_from("<I", cd_data, pos + 24)[0]
         name_len = struct.unpack_from("<H", cd_data, pos + 28)[0]
@@ -100,13 +163,12 @@ def find_kernelcache_in_ipsw(ipsw_url, out_path):
         local_off = struct.unpack_from("<I", cd_data, pos + 42)[0]
         name_raw = cd_data[pos + 44:pos + 44 + name_len]
         extra = cd_data[pos + 44 + name_len:pos + 44 + name_len + extra_len]
-
         if comp_size == 0xFFFFFFFF or uncomp_size == 0xFFFFFFFF or local_off == 0xFFFFFFFF:
             ep = 0
             while ep + 4 <= len(extra):
                 tag = struct.unpack_from("<H", extra, ep)[0]
                 esz = struct.unpack_from("<H", extra, ep + 2)[0]
-                if tag == 0x0001 and esz >= 28:  # ZIP64 extended info
+                if tag == 0x0001 and esz >= 28:
                     o = ep + 4
                     if uncomp_size == 0xFFFFFFFF:
                         uncomp_size = struct.unpack_from("<Q", extra, o)[0]; o += 8
@@ -116,15 +178,10 @@ def find_kernelcache_in_ipsw(ipsw_url, out_path):
                         local_off = struct.unpack_from("<Q", extra, o)[0]
                     break
                 ep += 4 + esz
-
         if b"kernelcache" in name_raw.lower():
-            kc = {
-                "name": name_raw.decode("utf-8", "replace"),
-                "comp_size": comp_size,
-                "local_off": local_off,
-                "nl": name_len,
-                "el": extra_len,
-            }
+            kc = {"name": name_raw.decode("utf-8", "replace"),
+                  "comp_size": comp_size, "local_off": local_off,
+                  "nl": name_len, "el": extra_len}
             break
         pos += 46 + name_len + extra_len + comment_len
 
@@ -138,12 +195,47 @@ def find_kernelcache_in_ipsw(ipsw_url, out_path):
     if not raw or len(raw) < 1000:
         log("Download failed (got {} bytes)".format(len(raw) if raw else 0))
         return 3
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    with open(out_path, "wb") as f:
-        f.write(raw)
-    log("Saved kernelcache -> {} ({:,} bytes = {:.1f} MB)".format(
-        out_path, len(raw), len(raw) / 1024 / 1024))
-    return 0
+    lzfse = extract_lzfse_from_im4p(raw)
+    if not lzfse:
+        log("Could not extract LZFSE from {} (magic=%r)" % (kc["name"], raw[:4]))
+        return 3
+    return 0 if save_lzfse(lzfse, out_path) else 3
+
+
+# ---------------------------------------------------------------------------
+# OTA path (OTA-only build, e.g. 15.8.7 / 15.8.8)
+# ---------------------------------------------------------------------------
+def find_kernelcache_in_ota(ota_url, out_path):
+    log("Downloading OTA (this can be ~1-2 GB) ...")
+    raw = get_url(ota_url, timeout=600)
+    if not raw or len(raw) < 1_000_000:
+        log("Failed to download OTA (got {} bytes)".format(len(raw) if raw else 0))
+        return 4
+    try:
+        z = zipfile.ZipFile(io.BytesIO(raw))
+    except Exception as e:
+        log("OTA is not a readable zip: {}".format(e))
+        return 4
+    # Prefer a kernelcache entry whose path mentions the device board, else any kernelcache.
+    candidates = []
+    for n in z.namelist():
+        nl = n.lower()
+        if "kernelcache" in nl and not nl.endswith(".dmg"):
+            candidates.append(n)
+    if not candidates:
+        log("kernelcache not a direct entry in this OTA (it is inside the payload DMG).")
+        log("Fallback: build the IPA, run it ONCE with a VPN -> kernelcache is cached in")
+        log("the app's Documents and every later install is fully offline. See README.")
+        return 5
+    # Pick the shortest-named candidate (the plain kernelcache, not a manifest duplicate).
+    cand = min(candidates, key=len)
+    log("Found OTA kernelcache entry: {}".format(cand))
+    data = z.read(cand)
+    lzfse = extract_lzfse_from_im4p(data)
+    if not lzfse:
+        log("Could not extract LZFSE from OTA entry (magic=%r)" % data[:4])
+        return 3
+    return 0 if save_lzfse(lzfse, out_path) else 3
 
 
 def main():
@@ -152,7 +244,7 @@ def main():
     ap.add_argument("--version", default="15.8.7")
     ap.add_argument("--build", default="19H384")
     ap.add_argument("--out", default=None)
-    ap.add_argument("--url", default=None, help="Direct .ipsw URL (skip feed lookup)")
+    ap.add_argument("--url", default=None, help="Direct .ipsw or .ota URL (skip lookup)")
     args = ap.parse_args()
 
     out = args.out or "kernelcaches/{}_{}/kernelcache".format(args.device, args.version)
@@ -160,11 +252,18 @@ def main():
         log("{} already exists — skipping (delete to re-fetch)".format(out))
         return 0
 
-    url = args.url or resolve_ipsw_url(args.device, args.build)
-    if not url:
-        log("Could not resolve IPSW URL. If Apple's feed is blocked, pass --url <direct .ipsw link>.")
-        return 4
-    return find_kernelcache_in_ipsw(url, out)
+    if args.url:
+        if args.url.endswith(".ota") or "ota" in args.url.lower():
+            return find_kernelcache_in_ota(args.url, out)
+        return find_kernelcache_in_ipsw(args.url, out)
+
+    restore, ota = resolve_firmware(args.build)
+    if restore:
+        return find_kernelcache_in_ipsw(restore, out)
+    if ota:
+        return find_kernelcache_in_ota(ota, out)
+    log("No firmware source found for build {}. Pass --url <direct link>.".format(args.build))
+    return 4
 
 
 if __name__ == "__main__":
