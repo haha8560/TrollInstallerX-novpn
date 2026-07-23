@@ -90,6 +90,15 @@ func extractTrollStoreIndirect() -> Bool {
         
     }
     
+    // v16: Keep a copy of TrollStore.tar at Documents/TrollStore.tar
+    // The patched PersistenceHelper reads from file:///var/mobile/Documents/TrollStore.tar
+    // instead of downloading from GitHub → fully offline installation, no VPN needed.
+    if !fm.fileExists(atPath: local.path) {
+        if let bundledTar = bundled {
+            try? fm.copyItem(at: bundledTar, to: local)
+        }
+    }
+    
     // We can assume the TrollStore directory exists, so now copy files
     let rootHelperPath = extractPath.appendingPathComponent("TrollStore.app").appendingPathComponent("trollstorehelper")
     let persistenceHelperPath = extractPath.appendingPathComponent("TrollStore.app").appendingPathComponent("PersistenceHelper")
@@ -113,7 +122,9 @@ func extractTrollStoreIndirect() -> Bool {
 func cleanupIndirectInstall() {
     let fm = FileManager.default
     let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
-    let extract = docs.appendingPathComponent("TrollStore")
+    // NOTE: Documents/TrollStore/ and Documents/TrollStore.tar are PRESERVED
+    // - TrollStore/ contains TrollStore.app components PersistenceHelper needs
+    // - TrollStore.tar is read by patched PersistenceHelper (file:// URL) for offline install
     let rootHelper = docs.appendingPathComponent("trollstorehelper")
     let persistenceHelper = docs.appendingPathComponent("PersistenceHelper")
     let dotFile = docs.appendingPathComponent(".TrollStorePersistenceHelper")
