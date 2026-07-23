@@ -2,8 +2,8 @@ name: Build TrollInstallerX (no-VPN)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
+    push:
+      branches: [ main ]
 
 jobs:
   build:
@@ -15,48 +15,43 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
-      - name: Install ldid (needed to re-sign the patched PersistenceHelper)
+      - name: Install ldid
         run: brew install ldid
 
-      # ── Extract kernelcaches for A9/A10 devices (iOS 15.8.7 / 15.8.8) ──
-      # iPhone 8 (A10) and iPhone 7 (A9) on iOS 15.8.x use LZSS-compressed
-      # kernelcaches in their IPSWs. The extraction script uses Python zipfile
-      # (ZIP64-safe) + macOS system compression framework to decompress into raw Mach-O.
-      - name: Extract kernelcache: iPhone8,1 / 15.8.7
+      - name: Extract kernelcache iPhone8,1 15.8.7
         run: |
           python3 tools/extract_ipsw_kernelcache.py \
             --ipsw "https://updates.cdn-apple.com/2025FallFCS/fullrestores/047-95429/C8FE847C-FE0E-49B1-9C7E-F56894B6E2BF/iPhone_4.7_15.8.7_19H411_Restore.ipsw" \
             --out "kernelcaches/iPhone8,1_15.8.7/kernelcache" \
-            || echo "WARNING: iPhone8,1/15.8.7 kernelcache extraction failed"
+            || echo "WARNING: kernelcache extraction failed for iPhone8,1/15.8.7"
 
-      - name: Extract kernelcache: iPhone8,1 / 15.8.8
+      - name: Extract kernelcache iPhone8,1 15.8.8
         run: |
           python3 tools/extract_ipsw_kernelcache.py \
             --ipsw "https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77510/5D4563BF-445C-4D8D-AF56-0BAC336265F3/iPhone_4.7_15.8.8_19H422_Restore.ipsw" \
             --out "kernelcaches/iPhone8,1_15.8.8/kernelcache" \
-            || echo "WARNING: iPhone8,1/15.8.8 kernelcache extraction failed"
+            || echo "WARNING: kernelcache extraction failed for iPhone8,1/15.8.8"
 
-      - name: Extract kernelcache: iPhone7,1 / 15.8.7 (A9)
+      - name: Extract kernelcache iPhone7,1 15.8.7
         run: |
           python3 tools/extract_ipsw_kernelcache.py \
             --ipsw "https://updates.cdn-apple.com/2025FallFCS/fullrestores/047-95429/C8FE847C-FE0E-49B1-9C7E-F56894B6E2BF/iPhone_4.7_15.8.7_19H411_Restore.ipsw" \
             --device "iPhone7,1" --version "15.8.7" \
             --out "kernelcaches/iPhone7,1_15.8.7/kernelcache" \
-            || echo "WARNING: iPhone7,1/15.8.7 kernelcache extraction failed"
+            || echo "WARNING: kernelcache extraction failed for iPhone7,1/15.8.7"
 
-      - name: Extract kernelcache: iPhone7,1 / 15.8.8 (A9)
+      - name: Extract kernelcache iPhone7,1 15.8.8
         run: |
           python3 tools/extract_ipsw_kernelcache.py \
             --ipsw "https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77510/5D4563BF-445C-4D8D-AF56-0BAC336265F3/iPhone_4.7_15.8.8_19H422_Restore.ipsw" \
             --device "iPhone7,1" --version "15.8.8" \
             --out "kernelcaches/iPhone7,1_15.8.8/kernelcache" \
-            || echo "WARNING: iPhone7,1/15.8.8 kernelcache extraction failed"
+            || echo "WARNING: kernelcache extraction failed for iPhone7,1/15.8.8"
 
-      # Show what we got
       - name: List extracted kernelcaches
-        run: find kernelcaches -name "kernelcache" -exec ls -lh {} \; 2>/dev/null || echo "No kernelcaches found"
+        run: find kernelcaches -type f -exec ls -lh {} \; 2>/dev/null || echo "No kernelcaches found"
 
-      - name: Build IPA (no-VPN fork)
+      - name: Build IPA
         run: bash build.sh
 
       - name: Upload IPA artifact
