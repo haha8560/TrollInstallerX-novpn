@@ -81,7 +81,11 @@ cp Resources/ents.plist "$APP_DIR/"
 # This makes the offline IPA buildable even if the file wasn't committed beforehand.
 
 # Devices we want baked in (device:version:build). Edit to add more models.
-FETCH_DEVICES=("iPhone8,1:15.8.7:19H384" "iPhone14,2:16.5.1:20F75")
+# A9: iPhone7,1 (iPhone 7), iPhone7,2 (iPhone 7 Plus), iPhone8,1 (iPhone 8),
+#      iPhone8,2 (iPhone 8 Plus), iPhone8,4 (iPhone SE2), iPhone8,3 (iPhone SE3)
+# A10: same as above (iPhone 8/8+ are A10)
+# Note: 15.8.7=19H411, 15.8.8=19H422
+FETCH_DEVICES=("iPhone8,1:15.8.7:19H411" "iPhone8,1:15.8.8:19H422" "iPhone14,2:16.5.1:20F75")
 if command -v python3 >/dev/null 2>&1 && [ -f tools/fetch_kernelcache_user.py ]; then
   for spec in "${FETCH_DEVICES[@]}"; do
     IFS=':' read -r m v b <<< "$spec"
