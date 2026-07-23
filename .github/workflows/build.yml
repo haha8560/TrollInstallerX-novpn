@@ -18,6 +18,9 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
+      - name: Install ldid (needed to re-sign the patched PersistenceHelper)
+        run: brew install ldid
+
       - name: Build IPA (no-VPN fork)
         run: bash build.sh
 

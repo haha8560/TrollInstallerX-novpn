@@ -18,6 +18,42 @@ cd "$(dirname "$0")"
 : "${SCHEME:=TrollInstallerX}"
 : "${CONFIG:=Release}"
 
+# --- v17: re-sign the patched PersistenceHelper (offline-install build) ---
+# Patching the GitHub URL inside __TEXT invalidates the Mach-O code signature.
+# An invalid signature makes the kernel kill Tips on launch (the v16 crash).
+# Re-sign it ad-hoc here, preserving the original entitlements, so the binary
+# is valid again and launches exactly like the stock opa334 helper (which is
+# itself ad-hoc signed).
+if [ -f Resources/TrollStore.tar ]; then
+  TMPD=$(mktemp -d)
+  tar xf Resources/TrollStore.tar -C "$TMPD"
+  PH="$TMPD/TrollStore.app/PersistenceHelper"
+  if [ -f "$PH" ]; then
+    ENT="$TMPD/ph_ent.xml"
+    if command -v ldid >/dev/null 2>&1; then
+      ldid -e "$PH" > "$ENT" 2>/dev/null || true
+      if [ -s "$ENT" ]; then
+        ldid -S"$ENT" "$PH"
+      else
+        ldid -S "$PH"
+      fi
+      echo "-> Re-signed patched PersistenceHelper via ldid (offline-install fix)"
+    elif command -v codesign >/dev/null 2>&1; then
+      codesign -d --entitlements "$ENT" - "$PH" >/dev/null 2>&1 || true
+      if [ -s "$ENT" ]; then
+        codesign --force --entitlements "$ENT" -s - "$PH"
+      else
+        codesign --force -s - "$PH"
+      fi
+      echo "-> Re-signed patched PersistenceHelper via codesign (offline-install fix)"
+    else
+      echo "!! WARNING: no codesigning tool available; patched PersistenceHelper left unsigned (Tips will crash on launch)"
+    fi
+    tar cf Resources/TrollStore.tar -C "$TMPD" TrollStore.app
+  fi
+  rm -rf "$TMPD"
+fi
+
 xcodebuild -configuration "$CONFIG" \
   -derivedDataPath DerivedData/"$SCHEME" \
   -destination 'generic/platform=iOS' \
